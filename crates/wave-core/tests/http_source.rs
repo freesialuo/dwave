@@ -154,6 +154,15 @@ fn recorded_wave_shapes_and_encoded_query_round_trip() -> Result<()> {
 }
 
 #[test]
+fn waves_accepts_listing_without_pagination() -> Result<()> {
+    let wave = json!({"id":"wave-id","waveNumber": 2});
+    let transport = FixtureTransport::new([json_response(&json!({"data": [wave]}))]);
+    let source = HttpWaveSource::new(transport.gateway(1));
+    assert_eq!(source.waves("program-id", 1)?, vec![wave]);
+    Ok(())
+}
+
+#[test]
 fn future_issue_fields_and_states_survive_without_optional_fields() -> Result<()> {
     let record = json!({
         "id": "example-id",
@@ -185,6 +194,28 @@ fn pagination_refuses_to_report_completion_when_cursor_is_missing() {
         .unwrap_err()
         .to_string()
         .contains("omitted its cursor"));
+}
+
+#[test]
+fn issue_pagination_requires_completion_metadata_and_honors_last_page() -> Result<()> {
+    let transport = FixtureTransport::new([
+        json_response(&json!({"data": []})),
+        json_response(&json!({"data": [], "pagination": {}})),
+        json_response(&json!({"data": [], "pagination": {
+            "hasNextPage": false, "nextCursor": "stale-cursor"
+        }})),
+    ]);
+    let source = HttpWaveSource::new(transport.gateway(3));
+    let query = RemoteQuery {
+        program_id: "program-id".into(),
+        limit: 100,
+        ..RemoteQuery::default()
+    };
+
+    assert!(source.issues_page(&query, None).is_err());
+    assert!(source.issues_page(&query, None).is_err());
+    assert_eq!(source.issues_page(&query, None)?.next_cursor, None);
+    Ok(())
 }
 
 #[test]
