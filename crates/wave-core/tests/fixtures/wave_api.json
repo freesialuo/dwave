@@ -1,0 +1,122 @@
+{
+  "program": {
+    "id": "a8858f1e-e6e8-401a-936c-8d94caab25dc",
+    "slug": "stellar",
+    "name": "Stellar"
+  },
+  "waves": {
+    "data": [
+      {
+        "id": "3667a420-27fd-4ce3-8717-a99be69f020b",
+        "waveProgramId": "a8858f1e-e6e8-401a-936c-8d94caab25dc",
+        "waveNumber": 11,
+        "startDate": "2026-11-18T14:00:35.145Z",
+        "endDate": "2026-11-25T14:00:55.830Z",
+        "budgetUSD": "75000.00",
+        "status": "active",
+        "createdAt": "2026-11-03T13:08:13.374Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 1,
+      "total": 11,
+      "totalPages": 11,
+      "hasNextPage": true,
+      "hasPreviousPage": false
+    }
+  },
+  "issues": {
+    "data": [
+      {
+        "id": "56bde360-099a-4d4c-bee7-1373395e400a",
+        "gitHubIssueId": 10,
+        "gitHubIssueNumber": 177,
+        "title": "Improve empty-state handling",
+        "body": "Fixture issue.",
+        "state": "open",
+        "gitHubAuthorId": 20,
+        "gitHubAuthorLogin": "fixture-author",
+        "assignees": [],
+        "labels": [
+          {
+            "id": 30,
+            "name": "bug",
+            "color": "d73a4a"
+          }
+        ],
+        "gitHubCreatedAt": "2026-11-19T07:36:27.000Z",
+        "gitHubUpdatedAt": "2026-11-24T18:47:30.000Z",
+        "gitHubClosedAt": null,
+        "repo": {
+          "id": "ec5256d8-5fa7-47ab-b7b8-72bd5e06454a",
+          "gitHubRepoName": "demo",
+          "gitHubRepoFullName": "example/demo",
+          "gitHubRepoUrl": "https://github.com/example/demo"
+        },
+        "createdAt": "2026-11-19T07:36:29.825Z",
+        "updatedAt": "2026-11-24T18:47:32.621Z",
+        "waveProgramId": "a8858f1e-e6e8-401a-936c-8d94caab25dc",
+        "pendingApplicationsCount": 0,
+        "assignedApplicant": null,
+        "complexity": "large",
+        "points": 200,
+        "pointsMultiplier": 1,
+        "pointsEarned": null,
+        "prLink": null,
+        "excludedFromPendingApplicationLimit": false,
+        "completedAt": null,
+        "resolvedInWave": null
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 1,
+      "total": 33413,
+      "totalPages": 33413,
+      "hasNextPage": true,
+      "hasPreviousPage": false,
+      "nextCursor": "opaque+/=cursor"
+    }
+  },
+  "issue": {
+    "id": "56bde360-099a-4d4c-bee7-1373395e400a",
+    "gitHubIssueId": 10,
+    "gitHubIssueNumber": 177,
+    "title": "Improve empty-state handling",
+    "body": "Fixture issue.",
+    "state": "open",
+    "gitHubAuthorId": 20,
+    "gitHubAuthorLogin": "fixture-author",
+    "assignees": [],
+    "labels": [
+      {
+        "id": 30,
+        "name": "bug",
+        "color": "d73a4a"
+      }
+    ],
+    "gitHubCreatedAt": "2026-11-19T07:36:27.000Z",
+    "gitHubUpdatedAt": "2026-11-24T18:47:30.000Z",
+    "gitHubClosedAt": null,
+    "repo": {
+      "id": "ec5256d8-5fa7-47ab-b7b8-72bd5e06454a",
+      "gitHubRepoName": "demo",
+      "gitHubRepoFullName": "example/demo",
+      "gitHubRepoUrl": "https://github.com/example/demo"
+    },
+    "createdAt": "2026-11-19T07:36:29.825Z",
+    "updatedAt": "2026-11-24T18:47:32.621Z",
+    "waveProgramId": "a8858f1e-e6e8-401a-936c-8d94caab25dc",
+    "pendingApplicationsCount": 0,
+    "assignedApplicant": null,
+    "complexity": "large",
+    "points": 200,
+    "pointsMultiplier": 1,
+    "pointsEarned": null,
+    "prLink": null,
+    "excludedFromPendingApplicationLimit": false,
+    "completedAt": null,
+    "resolvedInWave": null
+  }
+}
