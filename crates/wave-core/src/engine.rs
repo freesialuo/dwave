@@ -1,13 +1,12 @@
 use crate::filter::{github_issue_number, issue_time, repo_name, Filter, Mode, Plan, Sort};
-use crate::source::{BudgetExhausted, Page, RemoteQuery, WaveSource};
+use crate::source::{BudgetExhausted, Page, RemoteQuery, WaveSource, PAGE_LIMIT};
 use crate::store::{record_id, Cached, Scan, ScanKind, ScopeState, Store};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
-const PAGE_LIMIT: u32 = 100;
 const SCOPE_LOCK_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -250,7 +249,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                     let data = result?;
                     let now = Utc::now();
                     if let Some(issue) = &data {
-                        if record_id(issue)? != id {
+                        if !record_id(issue)?.eq_ignore_ascii_case(id) {
                             bail!("Wave returned a different issue ID for {id}");
                         }
                         self.store.upsert_issue(issue, now)?;
@@ -282,60 +281,45 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             });
         }
         let program_id = record_id(&program.data)?;
-        let repo_id = self.store.repo_id(program_id, repo)?;
-        let narrowed = repo_id.is_some();
         let query = RemoteQuery {
             program_id: program_id.to_owned(),
-            repo_id,
+            repo_id: self.store.repo_id(program_id, repo)?,
             sort_by: Some("updatedAt".into()),
             sort_order: Some("desc".into()),
             limit: PAGE_LIMIT,
             ..RemoteQuery::default()
         };
-        // The Wave search parameter targets text. Keep broad fallback bounded
-        // even when the command was started with a high invocation-wide budget.
-        let max_pages = if narrowed {
+
+        // The issue number and repo are the identity. The public title is
+        // only used to cheaply narrow Wave's fuzzy search.
+        match self.request(|source| source.github_issue_title(repo, number)) {
+            Some(Ok(Some(title))) => {
+                let search = RemoteQuery {
+                    search: Some(title),
+                    limit: 20,
+                    ..query.clone()
+                };
+                let (data, _) = self.lookup_pages(&search, repo, number, 3)?;
+                if data.is_some() {
+                    return Ok(lookup_refresh(data, program));
+                }
+            }
+            Some(Err(error)) => program
+                .warnings
+                .push(format!("GitHub issue title lookup failed: {error}")),
+            _ => {}
+        }
+        let max_pages = if query.repo_id.is_some() {
             self.remaining()
         } else {
-            self.remaining().min(3)
+            1
         };
-        let mut seen = HashSet::new();
-        let mut cursor = None;
-        for _ in 0..max_pages {
-            let Some(result) = self.request(|source| source.issues_page(&query, cursor.as_deref()))
-            else {
-                break;
-            };
-            let page = result?;
-            let now = Utc::now();
-            for issue in page.data {
-                let matches = repo_name(&issue).is_some_and(|name| name.eq_ignore_ascii_case(repo))
-                    && github_issue_number(&issue) == Some(number);
-                if matches {
-                    self.store.upsert_issue(&issue, now)?;
-                    return Ok(Refresh {
-                        data: Some(issue),
-                        as_of: Some(now),
-                        partial: program.partial,
-                        warnings: program.warnings,
-                    });
-                }
-            }
-            match page.next_cursor {
-                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
-                Some(_) => bail!("Wave returned a repeated cursor during issue lookup"),
-                None => {
-                    return Ok(Refresh {
-                        data: None,
-                        as_of: Some(now),
-                        partial: program.partial,
-                        warnings: program.warnings,
-                    });
-                }
-            }
+        let (data, exhausted) = self.lookup_pages(&query, repo, number, max_pages)?;
+        if data.is_some() || exhausted {
+            return Ok(lookup_refresh(data, program));
         }
         program.warnings.push(format!(
-            "could not complete lookup for {repo}#{number} within its request budget; use the Wave issue UUID"
+            "could not complete lookup for {repo}#{number}; use the Wave issue UUID or narrow to its Wave program"
         ));
         Ok(Refresh {
             data: None,
@@ -343,6 +327,41 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             partial: true,
             warnings: program.warnings,
         })
+    }
+
+    fn lookup_pages(
+        &mut self,
+        query: &RemoteQuery,
+        repo: &str,
+        number: u64,
+        max_pages: u64,
+    ) -> Result<(Option<Value>, bool)> {
+        let mut seen = HashSet::new();
+        let mut cursor = None;
+        for _ in 0..max_pages {
+            let Some(result) = self.request(|source| source.issues_page(query, cursor.as_deref()))
+            else {
+                return Ok((None, false));
+            };
+            let page = result?;
+            for issue in page.data {
+                let matches = repo_name(&issue).is_some_and(|name| name.eq_ignore_ascii_case(repo))
+                    && github_issue_number(&issue) == Some(number)
+                    && issue["waveProgramId"]
+                        .as_str()
+                        .is_none_or(|id| id == query.program_id);
+                if matches {
+                    self.store.upsert_issue(&issue, Utc::now())?;
+                    return Ok((Some(issue), true));
+                }
+            }
+            match page.next_cursor {
+                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
+                Some(_) => bail!("Wave returned a repeated cursor during issue lookup"),
+                None => return Ok((None, true)),
+            }
+        }
+        Ok((None, false))
     }
 
     pub fn explain(
@@ -450,31 +469,6 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                 }
             };
 
-        if options.new_since_last {
-            if partial {
-                matches.clear();
-                warnings.push("discovery was deferred until the scope sync completes".into());
-            } else {
-                // Scope keys can tighten once a repo UUID is learned. The
-                // baseline represents the user filter, independent of that.
-                let name = serde_json::to_string(&(program_id, filter.normalized()))?;
-                let ids = matches
-                    .iter()
-                    .map(record_id)
-                    .collect::<Result<BTreeSet<_>>>()?;
-                let new = self.store.discover(&name, &ids, now)?;
-                matches.retain(|issue| issue["id"].as_str().is_some_and(|id| new.contains(id)));
-            }
-        }
-
-        let total = if plan.mode == Mode::Passthrough && state.run.is_some() {
-            state
-                .total
-                .unwrap_or(matches.len() as u64)
-                .max(matches.len() as u64)
-        } else {
-            matches.len() as u64
-        };
         if plan.mode == Mode::ScopedSync {
             matches.sort_by(|left, right| options.sort.compare(left, right));
             plan.estimated_requests = state.estimated_requests;
@@ -482,11 +476,37 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             plan.estimated_requests = Some(options.target().div_ceil(u64::from(PAGE_LIMIT)));
             plan.remote.limit = options.target().min(u64::from(PAGE_LIMIT)) as u32;
         }
-        let data = matches
-            .into_iter()
-            .skip(options.offset())
-            .take(options.limit as usize)
-            .collect();
+
+        let (data, total) = if options.new_since_last {
+            if partial {
+                warnings.push("discovery was deferred until the scope sync completes".into());
+                (Vec::new(), 0)
+            } else {
+                // A learned repo UUID can tighten the remote scope. The
+                // discovery baseline still represents the same user filter.
+                let name = serde_json::to_string(&(program_id, filter.normalized()))?;
+                let ids = matches.iter().map(record_id).collect::<Result<Vec<_>>>()?;
+                let (selected, total) =
+                    self.store
+                        .discover(&name, &ids, options.offset(), options.limit, now)?;
+                matches
+                    .retain(|issue| issue["id"].as_str().is_some_and(|id| selected.contains(id)));
+                (matches, total)
+            }
+        } else {
+            let count = matches.len() as u64;
+            let total = if plan.mode == Mode::Passthrough && state.run.is_some() {
+                state.total.unwrap_or(count).max(count)
+            } else {
+                count
+            };
+            let data = matches
+                .into_iter()
+                .skip(options.offset())
+                .take(options.limit as usize)
+                .collect();
+            (data, total)
+        };
         Ok(Listing {
             data,
             as_of,
@@ -506,12 +526,55 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             }
             _ => None,
         };
-        Ok(filter.plan(
+        let planned = filter.plan(
             program_id.into(),
             repo_id,
             options.sort,
             options.forced_scope(),
-        ))
+        );
+        let current = self.store.scope_state(&scope_key(&planned)?)?;
+        if options.full
+            || current
+                .as_ref()
+                .is_some_and(|state| state.run.is_some() || state.as_of.is_some())
+        {
+            return Ok(planned);
+        }
+
+        // A completed superset is just as authoritative offline and can also
+        // preserve a zero-request repeat just after learning a repo UUID.
+        let supersets = [
+            filter.plan(
+                program_id.into(),
+                planned.remote.repo_id.clone(),
+                options.sort,
+                true,
+            ),
+            filter.plan(program_id.into(), None, options.sort, true),
+        ];
+        for candidate in supersets {
+            if candidate.mode == planned.mode && candidate.remote == planned.remote {
+                continue;
+            }
+            let Some(state) = self.store.scope_state(&scope_key(&candidate)?)? else {
+                continue;
+            };
+            let resuming_repo_scope = !filter.repos.is_empty()
+                && candidate.remote.repo_id.is_none()
+                && state.run.is_some();
+            let usable = resuming_repo_scope
+                || state.as_of.is_some_and(|as_of| {
+                    !options.freshness.allows_fetch(
+                        Some(as_of),
+                        self.config.listing_ttl,
+                        Utc::now(),
+                    )
+                });
+            if usable {
+                return Ok(candidate);
+            }
+        }
+        Ok(planned)
     }
 
     fn needs_sync(
@@ -531,6 +594,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             Mode::ScopedSync => options.full || is_old || state.run.is_some(),
             Mode::Passthrough => {
                 is_old
+                    || state.run.as_ref().is_some_and(|run| run.paused)
                     || (state.run.is_some()
                         && (self.matches(key, state, filter, now)?.len() as u64) < options.target())
             }
@@ -567,9 +631,17 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             state.run = Some(Scan::new(ScanKind::Pass, state));
             state.total = None;
         }
-        let mut seen = HashSet::new();
         loop {
-            let found = self.matches(key, state, filter, now)?.len() as u64;
+            let generation = state
+                .run
+                .as_ref()
+                .map_or(state.generation, |run| run.generation);
+            let found = self
+                .store
+                .scope_issues(key, generation)?
+                .iter()
+                .filter(|issue| filter.matches(issue, now))
+                .count() as u64;
             if found >= options.target() || state.run.is_none() {
                 if let Some(run) = &mut state.run {
                     run.paused = false;
@@ -590,7 +662,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                 self.store.save_scope_state(key, state, Utc::now())?;
                 return Ok(false);
             };
-            self.apply_page(key, remote, result?, state, &mut seen, None)?;
+            self.apply_page(key, remote, result?, state, None)?;
         }
     }
 
@@ -637,9 +709,13 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                     Some(estimate) if estimate > remaining => {}
                     _ => kind = ScanKind::Full,
                 }
-                if kind == ScanKind::Full && page.total == Some(0) && page.data.is_empty() {
+                if kind == ScanKind::Full
+                    && page.total == Some(0)
+                    && page.data.is_empty()
+                    && page.next_cursor.is_none()
+                {
                     state.run = Some(Scan::new(kind, state));
-                    self.apply_page(key, remote, page, state, &mut HashSet::new(), None)?;
+                    self.apply_page(key, remote, page, state, None)?;
                     return Ok(true);
                 }
             }
@@ -652,14 +728,13 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                 .ok()
                 .and_then(|overlap| watermark.checked_sub_signed(overlap))
         });
-        let mut seen = HashSet::new();
         while let Some(run) = &state.run {
             let Some(result) =
                 self.request(|source| source.issues_page(remote, run.cursor.as_deref()))
             else {
                 return Ok(false);
             };
-            self.apply_page(key, remote, result?, state, &mut seen, cutoff)?;
+            self.apply_page(key, remote, result?, state, cutoff)?;
         }
         Ok(true)
     }
@@ -670,7 +745,6 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
         remote: &RemoteQuery,
         mut page: Page<Value>,
         state: &mut ScopeState,
-        seen: &mut HashSet<String>,
         cutoff: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let now = Utc::now();
@@ -701,7 +775,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
         let position = run.position;
         let next = page.next_cursor.filter(|_| !end_of_overlap);
         if let Some(next) = &next {
-            if run.cursor.as_ref() == Some(next) || !seen.insert(next.clone()) {
+            if run.cursor.as_ref() == Some(next) || !run.seen_cursors.insert(next.clone()) {
                 bail!("Wave returned a repeated cursor for this scope");
             }
         }
@@ -753,6 +827,15 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             Err(error) if error.downcast_ref::<BudgetExhausted>().is_some() => None,
             result => Some(result),
         }
+    }
+}
+
+fn lookup_refresh(data: Option<Value>, program: Refresh<Value>) -> Refresh<Option<Value>> {
+    Refresh {
+        data,
+        as_of: Some(Utc::now()),
+        partial: program.partial,
+        warnings: program.warnings,
     }
 }
 

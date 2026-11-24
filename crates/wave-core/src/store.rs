@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SCHEMA_VERSION: u32 = 1;
-
 const SCHEMA: &str = "
 CREATE TABLE programs (
     slug TEXT PRIMARY KEY NOT NULL,
@@ -97,6 +95,18 @@ CREATE TABLE github_cache (
     next TEXT
 );";
 
+const DISCOVERY_RESULTS: &str = "
+CREATE TABLE discovery_results (
+    name TEXT NOT NULL REFERENCES discoveries(name) ON DELETE CASCADE,
+    issue_id TEXT NOT NULL,
+    position INTEGER,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (name, issue_id)
+);
+CREATE INDEX discovery_results_order ON discovery_results(name, position);";
+
+const MIGRATIONS: &[&str] = &[SCHEMA, DISCOVERY_RESULTS];
+
 pub struct Store {
     pub(crate) conn: Connection,
     path: Option<PathBuf>,
@@ -135,6 +145,8 @@ pub(crate) struct Scan {
     pub position: i64,
     #[serde(default)]
     pub paused: bool,
+    #[serde(default)]
+    pub seen_cursors: BTreeSet<String>,
     pub fetched_at: Option<DateTime<Utc>>,
     pub high_water: Option<DateTime<Utc>>,
 }
@@ -152,6 +164,7 @@ impl Scan {
             cursor: None,
             position: 0,
             paused: false,
+            seen_cursors: BTreeSet::new(),
             fetched_at: None,
             high_water: None,
         }
@@ -162,14 +175,15 @@ impl ScopeState {
     pub fn visible_generation(&self) -> i64 {
         self.run
             .as_ref()
+            .filter(|run| run.fetched_at.is_some())
             .map_or(self.generation, |run| run.generation)
     }
 
     pub fn visible_as_of(&self) -> Option<DateTime<Utc>> {
-        match &self.run {
-            Some(run) if run.generation != self.generation => run.fetched_at,
-            _ => self.as_of,
-        }
+        self.run
+            .as_ref()
+            .and_then(|run| run.fetched_at)
+            .or(self.as_of)
     }
 }
 
@@ -200,7 +214,9 @@ pub struct PruneStats {
     pub discoveries: usize,
 }
 
-pub(crate) struct ScopeLock(#[allow(dead_code)] Option<File>);
+pub(crate) struct ScopeLock {
+    _file: Option<File>,
+}
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -233,15 +249,17 @@ impl Store {
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match version {
-            0 => {
-                tx.execute_batch(SCHEMA).context("create cache schema")?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
-            SCHEMA_VERSION => {}
-            version => bail!(
-                "cache schema version {version} is newer than supported version {SCHEMA_VERSION}"
-            ),
+        let version = version as usize;
+        if version > MIGRATIONS.len() {
+            bail!(
+                "cache schema version {version} is newer than supported version {}",
+                MIGRATIONS.len()
+            );
+        }
+        for (index, migration) in MIGRATIONS.iter().enumerate().skip(version) {
+            tx.execute_batch(migration)
+                .with_context(|| format!("migrate cache to schema version {}", index + 1))?;
+            tx.pragma_update(None, "user_version", index + 1)?;
         }
         tx.commit()?;
         Ok(Self { conn, path })
@@ -249,7 +267,7 @@ impl Store {
 
     pub(crate) fn lock_scope(&self, scope: &str, max_wait: Duration) -> Result<Option<ScopeLock>> {
         let Some(path) = &self.path else {
-            return Ok(Some(ScopeLock(None)));
+            return Ok(Some(ScopeLock { _file: None }));
         };
         // A stable hash makes the lock name consistent across processes and
         // avoids embedding search strings or path separators in filenames.
@@ -268,7 +286,7 @@ impl Store {
         let start = Instant::now();
         loop {
             match FileExt::try_lock_exclusive(&file) {
-                Ok(()) => return Ok(Some(ScopeLock(Some(file)))),
+                Ok(()) => return Ok(Some(ScopeLock { _file: Some(file) })),
                 Err(error)
                     if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
                 {
@@ -499,9 +517,11 @@ impl Store {
     pub(crate) fn discover(
         &mut self,
         name: &str,
-        matches: &BTreeSet<&str>,
+        ordered_matches: &[&str],
+        offset: usize,
+        limit: u32,
         now: DateTime<Utc>,
-    ) -> Result<HashSet<String>> {
+    ) -> Result<(HashSet<String>, u64)> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -522,14 +542,18 @@ impl Store {
             let rows = statement.query_map([name], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<HashSet<_>>>()?
         };
-        let mut new = HashSet::new();
-        for id in matches.iter().filter(|id| !previous.contains(**id)) {
+        let matches: HashSet<_> = ordered_matches.iter().copied().collect();
+        for id in ordered_matches.iter().filter(|id| !previous.contains(**id)) {
             tx.execute(
                 "INSERT INTO discovery_matches VALUES (?1, ?2, ?3)",
                 params![name, id, now.timestamp_millis()],
             )?;
             if existed {
-                new.insert((*id).to_owned());
+                tx.execute(
+                    "INSERT INTO discovery_results (name, issue_id) VALUES (?1, ?2)
+                     ON CONFLICT(name, issue_id) DO UPDATE SET position=NULL, delivered=0",
+                    params![name, id],
+                )?;
             }
         }
         for id in previous.iter().filter(|id| !matches.contains(id.as_str())) {
@@ -537,17 +561,70 @@ impl Store {
                 "DELETE FROM discovery_matches WHERE name = ?1 AND issue_id = ?2",
                 params![name, id],
             )?;
+            tx.execute(
+                "UPDATE discovery_results SET delivered = 1 WHERE name = ?1 AND issue_id = ?2",
+                params![name, id],
+            )?;
         }
+
+        // Page one begins a new report over undelivered matches. Keep the
+        // positions of delivered entries while users read subsequent pages.
+        if offset == 0 {
+            tx.execute(
+                "DELETE FROM discovery_results WHERE name = ?1 AND delivered = 1",
+                [name],
+            )?;
+            tx.execute(
+                "UPDATE discovery_results SET position = NULL WHERE name = ?1",
+                [name],
+            )?;
+        }
+        let mut position: i64 = tx.query_row(
+            "SELECT coalesce(max(position) + 1, 0) FROM discovery_results WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        let queued = {
+            let mut statement = tx.prepare(
+                "SELECT issue_id FROM discovery_results
+                 WHERE name = ?1 AND position IS NULL AND delivered = 0",
+            )?;
+            let rows = statement.query_map([name], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        for id in ordered_matches.iter().filter(|id| queued.contains(**id)) {
+            tx.execute(
+                "UPDATE discovery_results SET position = ?3 WHERE name = ?1 AND issue_id = ?2",
+                params![name, id, position],
+            )?;
+            position += 1;
+        }
+
+        let start = i64::try_from(offset).unwrap_or(i64::MAX);
+        let end = start.saturating_add(i64::from(limit));
+        let range = params![name, start, end];
+        let selected = {
+            let mut statement = tx.prepare(
+                "SELECT issue_id FROM discovery_results
+                 WHERE name = ?1 AND position >= ?2 AND position < ?3 AND delivered = 0",
+            )?;
+            let rows = statement.query_map(range, |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        tx.execute(
+            "UPDATE discovery_results SET delivered = 1
+             WHERE name = ?1 AND position >= ?2 AND position < ?3",
+            range,
+        )?;
         tx.commit()?;
-        Ok(new)
+        Ok((selected, u64::try_from(position)?))
     }
 
     pub fn stats(&self) -> Result<CacheStats> {
-        let count = |table: &str| {
-            self.conn
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
+        let count = |table: &str| -> Result<u64> {
+            let sql = format!("SELECT count(*) FROM {table}");
+            let count: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
+            Ok(u64::try_from(count)?)
         };
         Ok(CacheStats {
             programs: count("programs")?,
