@@ -39,6 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          clean: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -70,7 +71,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $stage = Join-Path $env:RUNNER_TEMP 'npm-stage'
-          $pack = npm pack $stage --pack-destination $env:RUNNER_TEMP --json | ConvertFrom-Json
+          $pack = npm pack $stage --pack-destination $env:RUNNER_TEMP --json | Out-String | ConvertFrom-Json
           $archive = Join-Path $env:RUNNER_TEMP $pack.filename
           $prefix = Join-Path $env:RUNNER_TEMP 'npm-install'
           npm install --global --prefix $prefix --ignore-scripts --offline --no-audit --no-fund $archive
@@ -79,7 +80,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $prefix = Join-Path $env:RUNNER_TEMP 'npm-install'
           $command = Join-Path $prefix $(if ($IsWindows) { 'dwave.cmd' } else { 'bin/dwave' })
-          $version = (Get-Content npm/package.json | ConvertFrom-Json).version
+          $version = (Get-Content -Raw npm/package.json | ConvertFrom-Json).version
           $actual = & $command --version
           if ($actual -ne "dwave $version") { throw "Unexpected CLI version: $actual" }
           & $command --help
