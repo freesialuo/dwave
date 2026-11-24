@@ -138,7 +138,7 @@ pub struct IssuesArgs {
     pub github: bool,
 
     /// Start a full scoped sync instead of an incremental refresh.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "offline")]
     pub full: bool,
 
     /// Show the query plan using cached estimates.
@@ -156,7 +156,7 @@ pub struct SyncArgs {
     pub filter: FilterArgs,
 
     /// Start a full sync instead of an incremental refresh.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "offline")]
     pub full: bool,
 
     /// Show the query plan using cached estimates.
@@ -329,8 +329,8 @@ impl FilterArgs {
             let state = state.to_ascii_lowercase();
             filter.state = (state != "all").then_some(state);
         }
-        if let Some(bounds) = &self.pending {
-            filter.pending = Some(bounds.clone());
+        if let Some(bounds) = self.pending {
+            filter.pending = Some(bounds);
         }
         if let Some(value) = switch_pair(self.never_applied, self.has_applications) {
             filter.never_applied = Some(value);
