@@ -346,6 +346,14 @@ impl ConfigFile {
     }
 
     pub fn load(&self) -> Result<Config> {
+        let config = self.read_config()?;
+        config
+            .validate()
+            .with_context(|| format!("validate {}", self.path.display()))?;
+        Ok(config)
+    }
+
+    fn read_config(&self) -> Result<Config> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Config::default()),
@@ -353,12 +361,7 @@ impl ConfigFile {
                 return Err(error).with_context(|| format!("read {}", self.path.display()))
             }
         };
-        let config: Config =
-            toml::from_str(&contents).with_context(|| format!("parse {}", self.path.display()))?;
-        config
-            .validate()
-            .with_context(|| format!("validate {}", self.path.display()))?;
-        Ok(config)
+        toml::from_str(&contents).with_context(|| format!("parse {}", self.path.display()))
     }
 
     /// Reload under the same lock used for writes to preserve simultaneous edits.
@@ -379,7 +382,7 @@ impl ConfigFile {
         lock.lock()
             .with_context(|| format!("lock {}", lock_path.display()))?;
 
-        let mut config = self.load()?;
+        let mut config = self.read_config()?;
         let output = edit(&mut config)?;
         config.validate()?;
         let encoded = toml::to_string_pretty(&config)?;

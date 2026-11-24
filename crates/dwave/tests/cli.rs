@@ -111,6 +111,19 @@ fn validates_filters_and_global_arguments_as_usage_errors() {
 }
 
 #[test]
+fn config_set_can_repair_a_previously_accepted_invalid_rate() {
+    let fixture = Fixture::new("legacy-rate");
+    fs::write(fixture.root.join("config.toml"), "wave_rate = 1e-100\n").unwrap();
+    let repaired = envelope(
+        &fixture.run(&["config", "set", "wave_rate", "2.0", "--json"]),
+        0,
+    );
+    assert_eq!(repaired["data"]["value"], 2.0);
+    let stored = envelope(&fixture.run(&["config", "get", "wave_rate", "--json"]), 0);
+    assert_eq!(stored["data"], repaired["data"]);
+}
+
+#[test]
 fn persists_defaults_and_presets_and_applies_explicit_overrides() {
     let fixture = Fixture::new("config-presets");
     let rate = envelope(&fixture.run(&["--json", "config", "get", "wave_rate"]), 0);
