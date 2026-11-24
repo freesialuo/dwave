@@ -29,6 +29,8 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Test release decisions offline
+        run: node --test scripts/npm-release.test.mjs
       - name: Match tag, npm version, and Rust workspace versions
         id: validate
         run: node scripts/npm-release.mjs validate "$GITHUB_REF_NAME"
