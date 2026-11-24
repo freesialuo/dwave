@@ -16,8 +16,7 @@ dwave --help
 The npm package targets macOS arm64/x64, Linux glibc arm64/x64 (Ubuntu 22.04 baseline), and Windows x64. Until publication, build from a Rust checkout:
 
 ```sh
-cargo build --release
-./target/release/dwave --help
+cargo run --release -- --help
 ```
 
 Use `dwave <command> --help` for the available options. The CLI can emit machine-readable JSON for scripts and the companion [skill](skills/dwave/SKILL.md).
@@ -44,7 +43,7 @@ Replace the example repository and issue number with real values. `untouched` se
 
 Filters that require local evaluation can take more requests than server-filtered queries. Use `--explain` to inspect the plan and cached estimate without making requests; narrow the query where possible, and adjust `--max-requests` deliberately. `--offline` uses cached data; `--fresh` requests a refresh. JSON output includes a `dwave/v1` schema and metadata such as freshness, request count, warnings, and whether results are partial. Check that metadata before relying on a result. `--ndjson` is available for streaming records.
 
-`issues --new-since-last` seeds its baseline on the first complete run and returns no new matches then. Later runs return exit code 10 when new matches are found, even if the requested page is empty. `watch check` returns exit code 10 when changes are found, 0 when none are found, 1 on error, and 2 for usage errors. A scheduled job must account for 10 as a change signal. Use `watch log` to inspect history.
+`issues --new-since-last` seeds its baseline on the first complete run and returns no new matches then. Later runs retain matches that have not yet been delivered across pages. Both discovery and `watch check` return 10 for confirmed changes, 0 for a complete check with no changes, 1 for an error or a partial check without confirmed changes, and 2 for usage errors. A partial check with confirmed changes still returns 10, so always inspect `meta.partial` and warnings. A scheduled job must account for 10 as a change signal. Use `watch log` to inspect history.
 
 For scheduled discovery, replace `watch check` in the following example with `issues --preset untouched --new-since-last`. For either command, handle the change exit code explicitly. This POSIX shell example also works with `set -e` because the command is in an `if` condition:
 
@@ -70,7 +69,7 @@ GitHub enrichment uses the first nonempty `GITHUB_TOKEN`, `GH_TOKEN`, or token r
 
 Wave's issue information can change between requests. Cached data is a snapshot, not a guarantee that an issue is still available. Before applying, check the issue on Wave and GitHub. In particular, a missing Wave PR link does not prove that no pull request exists.
 
-The client makes read-only requests to Wave and, when requested, GitHub. It does not apply to issues or post comments. Watch checks run on demand; use your own scheduler if you want periodic checks.
+The client makes read-only requests to Wave and GitHub. Resolving an uncached `owner/repo#N` or GitHub issue URL may request the public GitHub issue title even without `--github`, then match the Wave repository and issue number exactly. `--offline` suppresses that lookup. It does not apply to issues or post comments. Watch checks run on demand; use your own scheduler if you want periodic checks.
 
 ## Development
 
