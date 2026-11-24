@@ -2,24 +2,12 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, createReadStream, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { parseRelease, publishOnce } from './npm-release-decisions.mjs';
 
 const root = new URL('../', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('npm/package.json', root), 'utf8'));
 const targets = JSON.parse(readFileSync(new URL('npm/targets.json', root), 'utf8'));
 const registry = 'https://registry.npmjs.org';
-
-function parseRelease(tag) {
-  const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(tag);
-  if (!match || match[4]?.split('.').some(identifier => /^0\d+$/.test(identifier))) {
-    throw new Error(`Expected a v-prefixed SemVer release tag without build metadata, got ${tag}`);
-  }
-
-  const version = tag.slice(1);
-  if (version !== manifest.version) {
-    throw new Error(`Tag ${tag} does not match npm package version ${manifest.version}`);
-  }
-  return { version, dist_tag: match[4] ? 'next' : 'latest' };
-}
 
 function validateCargoVersion(version) {
   const metadata = JSON.parse(execFileSync('cargo', [
@@ -86,25 +74,22 @@ async function publishedIntegrity(version) {
 }
 
 async function publish(archive, release, integrity) {
-  const version = `${manifest.name}@${release.version}`;
-  const prior = await publishedIntegrity(release.version);
-  if (prior) {
-    if (prior !== integrity) throw new Error(`${version} already exists with a different tarball`);
-    console.log(`${version} already published with the same integrity.`);
-    return;
-  }
-
-  const result = spawnSync('npm', ['publish', archive, '--registry', registry, '--access', 'public', '--tag', release.dist_tag], {
-    stdio: 'inherit',
+  const packageVersion = `${manifest.name}@${release.version}`;
+  const result = await publishOnce({
+    packageVersion,
+    integrity,
+    lookup: () => publishedIntegrity(release.version),
+    publish: () => spawnSync('npm', [
+      'publish', archive, '--registry', registry, '--access', 'public', '--tag', release.dist_tag,
+    ], { stdio: 'inherit' }),
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0 && await publishedIntegrity(release.version) !== integrity) {
-    throw new Error(`npm publish failed for ${version} (exit ${result.status ?? result.signal})`);
+  if (result === 'already-published') {
+    console.log(`${packageVersion} already published with the same integrity.`);
   }
 }
 
 const [operation, tag, archive, expectedIntegrity] = process.argv.slice(2);
-const release = parseRelease(tag);
+const release = parseRelease(tag, manifest.version);
 
 if (operation === 'validate') {
   validateCargoVersion(release.version);
