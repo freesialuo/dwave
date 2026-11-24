@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wave-core"]
+members = ["crates/dwave", "crates/wave-core"]
 resolver = "2"
 
 [workspace.package]
