@@ -1,5 +1,5 @@
 {
-  "name": "dwave",
+  "name": "@freesialuo/dwave",
   "version": "0.1.0",
   "description": "Unofficial command-line client for Drips Wave programs",
   "license": "MIT OR Apache-2.0",

@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.validate.outputs.version }}
+      tarball: ${{ steps.validate.outputs.tarball }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,6 +52,7 @@ jobs:
       integrity: ${{ steps.verify.outputs.integrity }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      TARBALL: ${{ needs.version.outputs.tarball }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,18 +72,18 @@ jobs:
           npm pack "$RUNNER_TEMP/npm-stage" --pack-destination "$RUNNER_TEMP"
       - name: Verify archive contents, metadata, and integrity
         id: verify
-        run: node scripts/npm-release.mjs verify "$GITHUB_REF_NAME" "$RUNNER_TEMP/dwave-$VERSION.tgz"
+        run: node scripts/npm-release.mjs verify "$GITHUB_REF_NAME" "$RUNNER_TEMP/$TARBALL"
       - name: Smoke test the exact release tarball offline
         run: |
           prefix="$RUNNER_TEMP/npm-install"
-          npm install --global --prefix "$prefix" --ignore-scripts --offline --no-audit --no-fund "$RUNNER_TEMP/dwave-$VERSION.tgz"
+          npm install --global --prefix "$prefix" --ignore-scripts --offline --no-audit --no-fund "$RUNNER_TEMP/$TARBALL"
           test "$("$prefix/bin/dwave" --version)" = "dwave $VERSION"
           "$prefix/bin/dwave" --help
       - name: Upload tested npm tarball
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-package
-          path: ${{ runner.temp }}/dwave-${{ env.VERSION }}.tgz
+          path: ${{ runner.temp }}/${{ env.TARBALL }}
           if-no-files-found: error
           retention-days: 30
           overwrite: true
@@ -101,7 +103,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      VERSION: ${{ needs.version.outputs.version }}
+      TARBALL: ${{ needs.version.outputs.tarball }}
       EXPECTED_INTEGRITY: ${{ needs.pack.outputs.integrity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,4 +122,4 @@ jobs:
           name: npm-package
           path: ${{ runner.temp }}/npm-package
       - name: Publish or verify an identical existing release
-        run: node scripts/npm-release.mjs publish "$GITHUB_REF_NAME" "$RUNNER_TEMP/npm-package/dwave-$VERSION.tgz" "$EXPECTED_INTEGRITY"
+        run: node scripts/npm-release.mjs publish "$GITHUB_REF_NAME" "$RUNNER_TEMP/npm-package/$TARBALL" "$EXPECTED_INTEGRITY"

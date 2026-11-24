@@ -6,14 +6,14 @@ An unofficial, read-only command-line tool for discovering and tracking issues i
 
 ## Getting started
 
-Once the package is published, install it with Node.js 22 or newer:
+Install the CLI from npm with Node.js 22 or newer:
 
 ```sh
-npm install -g dwave
+npm install -g @freesialuo/dwave
 dwave --help
 ```
 
-The npm package targets macOS arm64/x64, Linux glibc arm64/x64 (Ubuntu 22.04 baseline), and Windows x64. Until publication, build from a Rust checkout:
+The npm package targets macOS arm64/x64, Linux glibc arm64/x64 (Ubuntu 22.04 baseline), and Windows x64. To build and run it from a Rust checkout:
 
 ```sh
 cargo run --release -- --help
@@ -89,22 +89,22 @@ The release workflow builds and tests native binaries and uploads the tested `np
 
 ### One-time setup
 
-1. Confirm that the unscoped name `dwave` is available on [npm](https://www.npmjs.com/package/dwave), or that your npm account is a maintainer of the existing package. An existing package owned by someone else cannot be used for this release; choose another name and update the package and release tooling before publishing. Create an npm account, verify its email, and [enable two-factor authentication](https://docs.npmjs.com/configuring-two-factor-authentication/) for the maintainer account.
+1. Confirm that the publishing account owns the `@freesialuo` scope or has permission to publish [@freesialuo/dwave](https://www.npmjs.com/package/@freesialuo/dwave). Create an npm account, verify its email, and [enable two-factor authentication](https://docs.npmjs.com/configuring-two-factor-authentication/) for the maintainer account.
 2. In the GitHub repository, enable Actions and create an environment named `npm` under **Settings → Environments**. Configure any desired reviewers and deployment restrictions; if using selected branches and tags, explicitly allow the release tags. Availability of environments and protection rules depends on repository visibility and plan; see [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments). Protect release tags as appropriate.
-3. If `dwave` has never been published, leave `NPM_TRUSTED_PUBLISHING_ENABLED` unset for the first release. After the tag run completes its build and pack jobs, download its `npm-package` artifact from GitHub Actions. Compare the tarball's SHA-512 integrity with the `integrity` output in the run's **Verify archive contents, metadata, and integrity** step. This Node.js command works on macOS, Linux, and Windows (substitute the downloaded path):
+3. For a new scoped release, download the `npm-package` artifact from its completed tag run. The pack job stages the native binaries and runs `npm pack` on the staged package. Compare the downloaded tarball's SHA-512 integrity with the `integrity` output in that run's **Verify archive contents, metadata, and integrity** step. This Node.js command works on macOS, Linux, and Windows (substitute the downloaded path):
 
    ```sh
-   node -e "const fs=require('node:fs'),c=require('node:crypto'); console.log('sha512-'+c.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'))" /path/to/dwave-0.1.0.tgz
+   node -e "const fs=require('node:fs'),c=require('node:crypto'); console.log('sha512-'+c.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'))" /path/to/freesialuo-dwave-0.1.0.tgz
    ```
 
-   Proceed only if it matches. On a machine logged in as the npm maintainer, publish that exact tarball, responding to the 2FA prompt:
+   Proceed only if it matches. The original `v0.1.0` Actions artifact was unscoped. Its locally repacked scoped tarball, `freesialuo-dwave-0.1.0.tgz`, contains the same binaries but has a different digest; do not compare it to the original artifact's integrity as if it were the same archive. On a machine logged in as the npm maintainer, publish the verified scoped tarball, responding to the 2FA prompt:
 
    ```sh
    npm login
-   npm publish /path/to/dwave-0.1.0.tgz --access public
+   npm publish /path/to/freesialuo-dwave-0.1.0.tgz --access public
    ```
 
-   Replace the filename with the actual artifact. For a prerelease, add `--tag next`. Check the package name and version before publishing: npm versions cannot be reused. The disabled publish job is expected to be skipped. If the package already exists and you have maintainer access, skip this bootstrap and use an unpublished version for the first trusted publish.
+   Replace the filename with the actual tarball. For a prerelease, add `--tag next`. Check the package name and version before publishing: npm versions cannot be reused. If npm stages a release for approval, an authorized package maintainer must approve it before it becomes publicly available. The existing `0.0.0-stage` placeholder establishes the package; use an unpublished version for the first trusted publish.
 4. When the next unpublished release is ready, configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) in the package's **Settings → Trusted publishing**. Select GitHub Actions, enter the actual GitHub owner and repository, workflow filename `release.yml` (filename only), and environment `npm`; enable direct `npm publish`. In GitHub, set the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` to `true` under **Settings → Secrets and variables → Actions → Variables**. The first successful publish with a new trusted publisher must occur within two days, or the configuration expires and must be recreated. A matching existing version is a no-op, so use a new version to validate OIDC. After a successful trusted publish, consider restricting token-based publishing as npm recommends.
 
 ### Each release

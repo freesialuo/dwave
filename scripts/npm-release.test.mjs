@@ -17,7 +17,7 @@ test('publishes stable releases to latest and prereleases to next', () => {
   assert.deepEqual(parseRelease('v1.2.3-rc.1', '1.2.3-rc.1'), { version: '1.2.3-rc.1', dist_tag: 'next' });
 });
 
-const packageVersion = 'dwave@1.2.3';
+const packageVersion = '@freesialuo/dwave@1.2.3';
 const integrity = 'sha512-expected';
 
 test('rejects an existing version with different integrity before publishing', async t => {
@@ -58,7 +58,7 @@ test('accepts a publish race only if the same bytes won', async t => {
 test('surfaces a failed publish when the version remains absent', async t => {
   const lookup = t.mock.fn(() => null);
   const publish = t.mock.fn(() => ({ status: 42 }));
-  await assert.rejects(publishOnce({ packageVersion, integrity, lookup, publish }), /npm publish failed for dwave@1\.2\.3 \(exit 42\)/);
+  await assert.rejects(publishOnce({ packageVersion, integrity, lookup, publish }), /npm publish failed for @freesialuo\/dwave@1\.2\.3 \(exit 42\)/);
   assert.equal(lookup.mock.callCount(), 2);
   assert.equal(publish.mock.callCount(), 1);
 });

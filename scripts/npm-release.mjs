@@ -32,8 +32,8 @@ function output(values) {
   }
 }
 
-async function verifyPackage(archive, version) {
-  if (basename(archive) !== `${manifest.name}-${version}.tgz`) {
+async function verifyPackage(archive, { version, tarball }) {
+  if (basename(archive) !== tarball) {
     throw new Error(`Unexpected release archive filename: ${archive}`);
   }
 
@@ -62,15 +62,18 @@ async function verifyPackage(archive, version) {
 }
 
 async function publishedIntegrity(version) {
-  const response = await fetch(`${registry}/${manifest.name}/${version}`, {
+  const registryName = manifest.name.replace('/', '%2f');
+  const response = await fetch(`${registry}/${registryName}`, {
     headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000),
   });
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status} loading ${manifest.name}@${version}`);
 
-  const { dist } = await response.json();
-  if (!dist?.integrity) throw new Error(`Missing npm integrity for published ${manifest.name}@${version}`);
-  return dist.integrity;
+  const { versions } = await response.json();
+  const published = versions[version];
+  if (!published) return null;
+  if (!published.dist?.integrity) throw new Error(`Missing npm integrity for published ${manifest.name}@${version}`);
+  return published.dist.integrity;
 }
 
 async function publish(archive, release, integrity) {
@@ -90,16 +93,17 @@ async function publish(archive, release, integrity) {
 
 const [operation, tag, archive, expectedIntegrity] = process.argv.slice(2);
 const release = parseRelease(tag, manifest.version);
+release.tarball = `${manifest.name.replace(/^@/, '').replace('/', '-')}-${release.version}.tgz`;
 
 if (operation === 'validate') {
   validateCargoVersion(release.version);
   output(release);
 } else if (operation === 'verify' && archive) {
-  const integrity = await verifyPackage(archive, release.version);
+  const integrity = await verifyPackage(archive, release);
   output({ integrity });
 } else if (operation === 'publish' && archive && expectedIntegrity) {
   if (!process.env.GITHUB_REPOSITORY) throw new Error('Publishing requires the GitHub repository context');
-  const integrity = await verifyPackage(archive, release.version);
+  const integrity = await verifyPackage(archive, release);
   if (integrity !== expectedIntegrity) throw new Error('Release tarball differs from the verified tarball');
   await publish(archive, release, integrity);
 } else {
