@@ -599,3 +599,116 @@ fn learning_repo_id_does_not_restart_an_unfinished_scope() -> Result<()> {
     source.complete();
     Ok(())
 }
+
+#[test]
+fn concurrent_scope_serves_cache_without_fetching_the_same_page() -> Result<()> {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const CHILD_CACHE: &str = "DWAVE_ENGINE_TEST_CHILD_CACHE";
+    let filter = Filter::default();
+    let options = ListingOptions {
+        freshness: Freshness::Fresh,
+        ..ListingOptions::default()
+    };
+    if let Some(path) = std::env::var_os(CHILD_CACHE) {
+        let mut store = Store::open(path)?;
+        let source = Fixture::new([Reply::Program]);
+        let result = Engine::new(&mut store, &source, EngineConfig::default())
+            .list("stellar", &filter, options)?;
+        assert_eq!(ids(&result), ["cached"]);
+        assert!(result.partial);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("another process")));
+        source.complete();
+        return Ok(());
+    }
+
+    // Retain the tiny fixture in Cargo's test artifact directory.
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("scope-lock-{}-{unique}", std::process::id()))
+        .join("cache.db");
+    {
+        let mut store = Store::open(&path)?;
+        let source = Fixture::new([
+            Reply::Program,
+            page(20, None, None, 1, vec![issue("cached", 1, false, RECENT)]),
+        ]);
+        Engine::new(&mut store, &source, EngineConfig::default()).list(
+            "stellar",
+            &filter,
+            ListingOptions::default(),
+        )?;
+        source.complete();
+    }
+
+    struct HoldingSource {
+        ready: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    impl WaveSource for HoldingSource {
+        fn program(&self, _: &str) -> Result<Value> {
+            Ok(json!({"id": PROGRAM}))
+        }
+
+        fn waves(&self, _: &str, _: u32) -> Result<Vec<Value>> {
+            panic!("unexpected waves API request");
+        }
+
+        fn issues_page(&self, _: &RemoteQuery, _: Option<&str>) -> Result<Page<Value>> {
+            self.ready.send(())?;
+            self.release.recv_timeout(Duration::from_secs(10))?;
+            Ok(Page {
+                data: vec![issue("updated", 10, false, RECENT)],
+                total: Some(1),
+                next_cursor: None,
+            })
+        }
+
+        fn issue(&self, _: &str) -> Result<Option<Value>> {
+            panic!("unexpected issue API request");
+        }
+    }
+
+    let (ready, entered) = channel();
+    let (release, pending) = channel();
+    let writer_path = path.clone();
+    let refresh_thread = thread::spawn(move || -> Result<()> {
+        let mut store = Store::open(writer_path)?;
+        let source = HoldingSource {
+            ready,
+            release: pending,
+        };
+        let result = Engine::new(&mut store, &source, EngineConfig::default())
+            .list("stellar", &filter, options)?;
+        assert!(!result.partial);
+        assert_eq!(ids(&result), ["updated"]);
+        Ok(())
+    });
+    entered.recv_timeout(Duration::from_secs(10))?;
+    let child = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "concurrent_scope_serves_cache_without_fetching_the_same_page",
+        ])
+        .env(CHILD_CACHE, path)
+        .output();
+    release.send(())?;
+    refresh_thread.join().expect("refresh worker panicked")?;
+    let child = child?;
+    assert!(
+        child.status.success(),
+        "competing process failed: {}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    Ok(())
+}
