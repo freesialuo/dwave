@@ -162,23 +162,18 @@ impl<'a> Watcher<'a> {
         let mut result = WatchCheck::default();
         for entry in self.store.watchlist()? {
             let id = &entry.issue_id;
-            let cached = self.store.cached_issue_status(id)?;
+            let mut cached = self.store.cached_issue_status(id)?;
             let as_of = cached.as_ref().map(|issue| issue.fetched_at);
-            let (issue, as_of) = if self.freshness.allows_fetch(as_of, self.issue_ttl, self.now) {
+            if self.freshness.allows_fetch(as_of, self.issue_ttl, self.now) {
                 match self.source.issue(id) {
-                    Ok(issue) => {
-                        match &issue {
-                            Some(issue) => {
-                                ensure!(
-                                    issue["id"].as_str() == Some(id),
-                                    "Wave returned a different issue for {id}"
-                                );
-                                self.store.upsert_issue(issue, self.now)?;
-                            }
-                            None => self.store.set_issue_missing(id, self.now)?,
-                        }
-                        (issue, self.now)
+                    Ok(Some(issue)) => {
+                        ensure!(
+                            issue["id"].as_str() == Some(id),
+                            "Wave returned a different issue for {id}"
+                        );
+                        self.store.upsert_issue(&issue, self.now)?;
                     }
+                    Ok(None) => self.store.set_issue_missing(id, self.now)?,
                     Err(error) => {
                         result.partial = true;
                         if error.downcast_ref::<BudgetExhausted>().is_some() {
@@ -189,20 +184,22 @@ impl<'a> Watcher<'a> {
                         continue;
                     }
                 }
-            } else {
-                let Some(cached) = cached else {
-                    result.partial = true;
-                    result.warn(format!("no cache for watched issue {id} in offline mode"));
-                    continue;
-                };
+                // Use the persisted precision and respect a concurrent newer refresh.
+                cached = self.store.cached_issue_status(id)?;
+            } else if let Some(cached) = &cached {
                 if Freshness::Default.allows_fetch(as_of, self.issue_ttl, self.now) {
                     result.warn(format!(
                         "using stale Wave cache for {id} from {}",
                         cached.fetched_at
                     ));
                 }
-                (cached.data, cached.fetched_at)
+            }
+            let Some(cached) = cached else {
+                result.partial = true;
+                result.warn(format!("no cached observation for watched issue {id}"));
+                continue;
             };
+            let (issue, as_of) = (cached.data, cached.fetched_at);
             result.observe(as_of);
             let mut snapshot = Snapshot::from_issue(issue.as_ref(), as_of);
             if let (Some(github), Some(issue)) = (github, issue.as_ref()) {
@@ -500,7 +497,7 @@ mod tests {
             Err(BudgetExhausted.into()),
             Ok(None),
         ])));
-        let start = now();
+        let start = now() + TimeDelta::nanoseconds(123_456);
         store.watch_add(ID, Some("candidate"), start)?;
         store.watch_add(ID, None, start + TimeDelta::seconds(1))?;
         assert_eq!(store.watchlist()?[0].note.as_deref(), Some("candidate"));
@@ -509,10 +506,12 @@ mod tests {
         let baseline =
             Watcher::new(&mut store, &source, start, TTL, Freshness::Default).check(None)?;
         assert!(baseline.changes.is_empty());
+        let stored_at = store.cached_issue_status(ID)?.unwrap().fetched_at;
+        assert_eq!(baseline.as_of, Some(stored_at));
         let within_ttl = start + TimeDelta::seconds(299);
         let cached =
             Watcher::new(&mut store, &source, within_ttl, TTL, Freshness::Default).check(None)?;
-        assert_eq!(cached.as_of, Some(start));
+        assert_eq!(cached.as_of, Some(stored_at));
         assert!(cached.changes.is_empty());
         assert_eq!(source.0.borrow().len(), 3);
 
