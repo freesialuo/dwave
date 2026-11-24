@@ -85,14 +85,35 @@ Tests should use fixtures rather than depend on the live Wave API. Changes to th
 
 ## Releasing
 
-The release workflow builds and tests native binaries and packages them for npm. To prepare a release:
+The release workflow builds and tests native binaries and uploads the tested `npm-package` tarball for a matching release tag. Publishing is disabled until the repository Actions variable `NPM_TRUSTED_PUBLISHING_ENABLED` is set to `true`.
 
-1. Update the workspace package version in `Cargo.toml` and the version in `npm/package.json` to the same SemVer version; refresh `Cargo.lock` and run the development checks above.
-2. Commit the version updates, then push a matching tag such as `v1.2.3` or `v1.2.3-rc.1`. The workflow builds the `npm-package` artifact and publishes stable releases under `latest` and prereleases under `next`.
-3. For the first publication, an npm maintainer with 2FA must download the tested `npm-package` Actions artifact from that tag run and publish the contained tarball: `npm publish /path/to/dwave-0.1.0.tgz --access public` (substitute the actual filename; add `--tag next` for a prerelease). If the OIDC job started before bootstrap, rerun the failed job after manual publication; an identical published tarball is accepted as a no-op, so this does not validate trusted publishing.
-4. Configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) with the actual GitHub owner and repository, workflow filename `release.yml`, environment `npm`, and permission for direct `npm publish`. The first automated publish using a new configuration must succeed within two days, or the configuration expires and must be recreated. Configure it when the next release is ready. Subsequent releases use OIDC.
+### One-time setup
 
-Protect the GitHub environment and release tags as appropriate. Once OIDC works, npm recommends restricting token-based publishing. No package is published merely by preparing this repository.
+1. Confirm that the unscoped name `dwave` is available on [npm](https://www.npmjs.com/package/dwave), or that your npm account is a maintainer of the existing package. An existing package owned by someone else cannot be used for this release; choose another name and update the package and release tooling before publishing. Create an npm account, verify its email, and [enable two-factor authentication](https://docs.npmjs.com/configuring-two-factor-authentication/) for the maintainer account.
+2. In the GitHub repository, enable Actions and create an environment named `npm` under **Settings → Environments**. Configure any desired reviewers and deployment restrictions; if using selected branches and tags, explicitly allow the release tags. Availability of environments and protection rules depends on repository visibility and plan; see [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments). Protect release tags as appropriate.
+3. If `dwave` has never been published, leave `NPM_TRUSTED_PUBLISHING_ENABLED` unset for the first release. After the tag run completes its build and pack jobs, download its `npm-package` artifact from GitHub Actions. Compare the tarball's SHA-512 integrity with the `integrity` output in the run's **Verify archive contents, metadata, and integrity** step. This Node.js command works on macOS, Linux, and Windows (substitute the downloaded path):
+
+   ```sh
+   node -e "const fs=require('node:fs'),c=require('node:crypto'); console.log('sha512-'+c.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'))" /path/to/dwave-0.1.0.tgz
+   ```
+
+   Proceed only if it matches. On a machine logged in as the npm maintainer, publish that exact tarball, responding to the 2FA prompt:
+
+   ```sh
+   npm login
+   npm publish /path/to/dwave-0.1.0.tgz --access public
+   ```
+
+   Replace the filename with the actual artifact. For a prerelease, add `--tag next`. Check the package name and version before publishing: npm versions cannot be reused. The disabled publish job is expected to be skipped. If the package already exists and you have maintainer access, skip this bootstrap and use an unpublished version for the first trusted publish.
+4. When the next unpublished release is ready, configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) in the package's **Settings → Trusted publishing**. Select GitHub Actions, enter the actual GitHub owner and repository, workflow filename `release.yml` (filename only), and environment `npm`; enable direct `npm publish`. In GitHub, set the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` to `true` under **Settings → Secrets and variables → Actions → Variables**. The first successful publish with a new trusted publisher must occur within two days, or the configuration expires and must be recreated. A matching existing version is a no-op, so use a new version to validate OIDC. After a successful trusted publish, consider restricting token-based publishing as npm recommends.
+
+### Each release
+
+1. Update the workspace package version in `Cargo.toml` and the version in `npm/package.json` to the same SemVer version. Refresh `Cargo.lock` and run the development checks above.
+2. Commit the version updates and push a matching tag such as `v1.2.3` or `v1.2.3-rc.1`. The tag must not include build metadata. GitHub Actions builds and tests the native binaries, verifies the tarball, and uploads `npm-package`. When publishing is enabled, it publishes stable versions under `latest` and prereleases under `next` through OIDC.
+3. Check the Actions run and the published package. A rerun accepts an existing version only when its registry integrity matches the tested tarball; a different tarball fails. A successful no-op does not validate trusted publishing or change a dist-tag. Trusted publishing uses GitHub-hosted runners, and npm automatically generates provenance for a public package published from a public repository.
+
+No package is published merely by preparing this repository.
 
 ## License
 
