@@ -264,6 +264,38 @@ fn points_sort_applies_after_all_pages_and_deduplicates() -> Result<()> {
 }
 
 #[test]
+fn duplicate_cursor_rows_keep_the_newest_issue_payload() -> Result<()> {
+    let mut store = Store::memory()?;
+    let newer = issue("a", 50, false, RECENT);
+    let older = issue("a", 1, false, "2026-11-24T15:59:59Z");
+    let source = Fixture::new([
+        Reply::Program,
+        page(1, None, Some("probe"), 101, vec![newer.clone()]),
+        page(100, None, Some("next"), 101, vec![newer.clone()]),
+        page(
+            100,
+            Some("next"),
+            None,
+            101,
+            vec![older, issue("b", 25, false, RECENT)],
+        ),
+    ]);
+    let options = ListingOptions {
+        sort: Sort::Points,
+        ..ListingOptions::default()
+    };
+    let listed = Engine::new(&mut store, &source, EngineConfig::default()).list(
+        "stellar",
+        &Filter::default(),
+        options,
+    )?;
+    assert_eq!(ids(&listed), ["a", "b"]);
+    assert_eq!(store.cached_issue("a")?.unwrap().data, newer);
+    source.complete();
+    Ok(())
+}
+
+#[test]
 fn interrupted_full_sync_resumes_before_marking_departures_stale() -> Result<()> {
     let mut store = Store::memory()?;
     let a = issue("a", 10, false, RECENT);
@@ -515,6 +547,93 @@ fn offline_cold_and_stale_queries_expose_partial_and_as_of() -> Result<()> {
     assert_eq!(ids(&stale), ["a"]);
     source.complete();
     assert_eq!(store.prune(Utc::now() + TimeDelta::days(1))?.issues, 1);
+    Ok(())
+}
+
+#[test]
+fn offline_local_filters_can_use_a_complete_broader_listing() -> Result<()> {
+    let mut store = Store::memory()?;
+    let source = Fixture::new([
+        Reply::Program,
+        page(
+            20,
+            None,
+            None,
+            3,
+            vec![
+                issue("a", 4, false, RECENT),
+                issue("b", 2, false, RECENT),
+                issue("has-pr", 9, true, RECENT),
+            ],
+        ),
+    ]);
+    let mut engine = Engine::new(&mut store, &source, EngineConfig::default());
+    let cached = engine.list("stellar", &Filter::default(), ListingOptions::default())?;
+    let filters = Filter {
+        has_pr: Some(false),
+        points: Some(Bounds {
+            min: Some(2),
+            max: None,
+        }),
+        ..Filter::default()
+    };
+    let options = ListingOptions {
+        freshness: Freshness::Offline,
+        sort: Sort::Points,
+        ..ListingOptions::default()
+    };
+    let result = engine.list("stellar", &filters, options)?;
+    assert!(!result.partial);
+    assert_eq!(result.as_of, cached.as_of);
+    assert_eq!(result.total, 2);
+    assert_eq!(ids(&result), ["a", "b"]);
+
+    let needs_history = Filter {
+        never_applied: Some(true),
+        ..filters
+    };
+    let unsupported = engine.list("stellar", &needs_history, options)?;
+    assert!(unsupported.partial);
+    assert!(unsupported.data.is_empty());
+    source.complete();
+    Ok(())
+}
+
+#[test]
+fn offline_local_filters_report_compatible_cached_prefix_as_partial() -> Result<()> {
+    let mut store = Store::memory()?;
+    let source = Fixture::new([
+        Reply::Program,
+        page(
+            1,
+            None,
+            Some("next"),
+            200,
+            vec![issue("a", 4, false, RECENT)],
+        ),
+    ]);
+    let mut engine = Engine::new(&mut store, &source, EngineConfig::default());
+    let options = ListingOptions {
+        limit: 1,
+        ..ListingOptions::default()
+    };
+    let cached = engine.list("stellar", &Filter::default(), options)?;
+    let result = engine.list(
+        "stellar",
+        &Filter {
+            has_pr: Some(false),
+            ..Filter::default()
+        },
+        ListingOptions {
+            freshness: Freshness::Offline,
+            ..options
+        },
+    )?;
+    assert!(result.partial);
+    assert_eq!(result.as_of, cached.as_of);
+    assert_eq!(result.total, 1);
+    assert_eq!(ids(&result), ["a"]);
+    source.complete();
     Ok(())
 }
 

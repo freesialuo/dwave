@@ -421,6 +421,15 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
         let mut plan = self.plan(program_id, filter, options)?;
         let key = scope_key(&plan)?;
         let initial = self.store.scope_state(&key)?.unwrap_or_default();
+        plan.estimated_requests = initial.estimated_requests;
+        let alternate =
+            if options.freshness == Freshness::Offline && initial.visible_as_of().is_none() {
+                self.offline_listing(&plan.remote)?
+            } else {
+                None
+            };
+        let reused_cache = alternate.is_some();
+        let (key, initial) = alternate.unwrap_or((key, initial));
         let mut state = initial.clone();
         let mut partial = program.partial;
         let mut warnings = program.warnings;
@@ -472,6 +481,10 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             });
         }
         let mut matches = self.matches(&key, &state, filter, now)?;
+        if reused_cache && state.run.is_some() {
+            partial = true;
+            warnings.push("only part of a compatible listing is cached".into());
+        }
         partial |= as_of.is_none()
             || match plan.mode {
                 Mode::ScopedSync => state.run.is_some(),
@@ -480,9 +493,13 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                 }
             };
 
-        if plan.mode == Mode::ScopedSync {
+        if plan.mode == Mode::ScopedSync || reused_cache {
             matches.sort_by(|left, right| options.sort.compare(left, right));
-            plan.estimated_requests = state.estimated_requests;
+        }
+        if plan.mode == Mode::ScopedSync {
+            if !reused_cache {
+                plan.estimated_requests = state.estimated_requests;
+            }
         } else {
             plan.estimated_requests = Some(options.target().div_ceil(u64::from(PAGE_LIMIT)));
             plan.remote.limit = options.target().min(u64::from(PAGE_LIMIT)) as u32;
@@ -506,7 +523,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             }
         } else {
             let count = matches.len() as u64;
-            let total = if plan.mode == Mode::Passthrough && state.run.is_some() {
+            let total = if plan.mode == Mode::Passthrough && !reused_cache && state.run.is_some() {
                 state.total.unwrap_or(count).max(count)
             } else {
                 count
@@ -526,6 +543,25 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             total,
             plan,
         })
+    }
+
+    fn offline_listing(&self, query: &RemoteQuery) -> Result<Option<(String, ScopeState)>> {
+        let mut best = None;
+        for (key, state) in self.store.listing_scopes()? {
+            let Some(as_of) = state.visible_as_of() else {
+                continue;
+            };
+            let (_, cached): (Mode, RemoteQuery) = serde_json::from_str(&key)?;
+            let score = (state.run.is_none(), as_of);
+            if cached.covers(query)
+                && best
+                    .as_ref()
+                    .is_none_or(|(previous, _, _)| score > *previous)
+            {
+                best = Some((score, key, state));
+            }
+        }
+        Ok(best.map(|(_, key, state)| (key, state)))
     }
 
     fn plan(&self, program_id: &str, filter: &Filter, options: ListingOptions) -> Result<Plan> {

@@ -30,6 +30,19 @@ pub struct RemoteQuery {
     pub limit: u32,
 }
 
+impl RemoteQuery {
+    pub(crate) fn covers(&self, requested: &Self) -> bool {
+        self.program_id == requested.program_id
+            && (self.state.is_none() || self.state == requested.state)
+            && (self.has_pr.is_none() || self.has_pr == requested.has_pr)
+            && (self.search.is_none() || self.search == requested.search)
+            && (self.repo_id.is_none() || self.repo_id == requested.repo_id)
+            // The remote predicate supplies application history when the row
+            // only carries a pending count.
+            && self.has_applications == requested.has_applications
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page<T> {
     pub data: Vec<T>,

@@ -483,6 +483,20 @@ impl Store {
         Ok(raw.as_deref().map(serde_json::from_str).transpose()?)
     }
 
+    pub(crate) fn listing_scopes(&self) -> Result<Vec<(String, ScopeState)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT scope, state_json FROM sync_state ORDER BY scope")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (scope, state) = row?;
+            Ok((scope, serde_json::from_str(&state)?))
+        })
+        .collect()
+    }
+
     pub(crate) fn save_scope_state(
         &self,
         scope: &str,
@@ -746,6 +760,9 @@ fn write_issue<'a>(
     now: DateTime<Utc>,
 ) -> Result<&'a str> {
     let id = record_id(issue)?;
+    // Cursor pages can repeat a historical row. An explicit issue refresh
+    // remains authoritative even if its upstream timestamp moved backwards.
+    let from_listing = program_id.is_some();
     let program_id = issue["waveProgramId"].as_str().or(program_id);
     let repo_name = repo_name(issue);
     let repo_id = issue["repo"]["id"]
@@ -765,7 +782,9 @@ fn write_issue<'a>(
             pending=excluded.pending, assigned=excluded.assigned, has_pr=excluded.has_pr,
             points=excluded.points, updated_at=excluded.updated_at, created_at=excluded.created_at,
             raw_json=excluded.raw_json, fetched_at=excluded.fetched_at
-         WHERE issues.fetched_at <= excluded.fetched_at",
+         WHERE issues.fetched_at <= excluded.fetched_at
+           AND (NOT ?14 OR issues.updated_at IS NULL OR excluded.updated_at IS NULL
+                OR issues.updated_at <= excluded.updated_at)",
         params![
             id,
             program_id,
@@ -780,6 +799,7 @@ fn write_issue<'a>(
             millis("createdAt"),
             serde_json::to_string(issue)?,
             now.timestamp_millis(),
+            from_listing,
         ],
     )?;
     if let (Some(program_id), Some(name), Some(repo_id)) = (program_id, repo_name, repo_id) {
