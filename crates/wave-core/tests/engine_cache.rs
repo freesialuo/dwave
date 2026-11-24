@@ -14,6 +14,7 @@ const REPO: &str = "owner/repo";
 
 enum Reply {
     Program,
+    ProgramRef(&'static str, &'static str),
     Title(String),
     Listing {
         limit: u32,
@@ -45,9 +46,13 @@ impl Fixture {
 
 impl WaveSource for Fixture {
     fn program(&self, slug: &str) -> Result<Value> {
-        assert_eq!(slug, "stellar");
-        assert!(matches!(self.next(), Reply::Program));
-        Ok(json!({"id": PROGRAM, "futureField": "preserved"}))
+        let (expected, id) = match self.next() {
+            Reply::Program => ("stellar", PROGRAM),
+            Reply::ProgramRef(slug, id) => (slug, id),
+            _ => panic!("expected a different API request"),
+        };
+        assert_eq!(slug, expected);
+        Ok(json!({"id": id, "futureField": "preserved"}))
     }
 
     fn waves(&self, _: &str, _: u32) -> Result<Vec<Value>> {
@@ -510,5 +515,87 @@ fn offline_cold_and_stale_queries_expose_partial_and_as_of() -> Result<()> {
     assert_eq!(ids(&stale), ["a"]);
     source.complete();
     assert_eq!(store.prune(Utc::now() + TimeDelta::days(1))?.issues, 1);
+    Ok(())
+}
+
+#[test]
+fn cached_github_references_use_the_selected_program_and_keep_tombstones() -> Result<()> {
+    const FIRST: &str = "810bd280-8b08-42ac-ac02-b1ba84031b5b";
+    const SECOND: &str = "9cbec4aa-4976-474b-b682-3f6a13db499b";
+    let mut store = Store::memory()?;
+    let first = issue(FIRST, 10, false, RECENT);
+    let mut second = issue(SECOND, 10, false, RECENT);
+    second["waveProgramId"] = json!("second-program");
+    let source = Fixture::new([
+        Reply::Program,
+        Reply::ProgramRef("second", "second-program"),
+        Reply::Issue(None),
+    ]);
+    let now = Utc::now();
+    store.upsert_issue(&first, now - TimeDelta::seconds(5))?;
+    store.upsert_issue(&second, now)?;
+    let mut engine = Engine::new(&mut store, &source, EngineConfig::default());
+    engine.program("stellar", Freshness::Default)?;
+    engine.program("second", Freshness::Default)?;
+    assert_eq!(
+        engine
+            .issue("owner/repo#7", Freshness::Offline, "stellar")?
+            .data,
+        Some(first)
+    );
+    assert_eq!(
+        engine
+            .issue("owner/repo#7", Freshness::Offline, "second")?
+            .data,
+        Some(second.clone())
+    );
+    assert!(engine
+        .issue("owner/repo#7", Freshness::Fresh, "stellar")?
+        .data
+        .is_none());
+    let gone = engine.issue("owner/repo#7", Freshness::Default, "stellar")?;
+    assert!(gone.data.is_none());
+    assert!(!gone.partial);
+    assert_eq!(
+        engine
+            .issue("owner/repo#7", Freshness::Default, "second")?
+            .data,
+        Some(second)
+    );
+    source.complete();
+    Ok(())
+}
+
+#[test]
+fn learning_repo_id_does_not_restart_an_unfinished_scope() -> Result<()> {
+    let mut store = Store::memory()?;
+    let mut matching = issue("a", 1, false, RECENT);
+    matching["repo"]["id"] = json!("1d9c0e08-0a2d-477f-bafd-89e389039fc9");
+    let mut other = issue("b", 2, false, RECENT);
+    other["repo"]["gitHubRepoFullName"] = json!("another/repo");
+    let source = Fixture::new([
+        Reply::Program,
+        page(1, None, None, 100, vec![matching.clone()]),
+        page(100, None, Some("continue-broad"), 101, vec![matching]),
+        page(100, Some("continue-broad"), None, 101, vec![other]),
+    ]);
+    let filter = Filter {
+        repos: vec![REPO.into()],
+        ..Filter::default()
+    };
+    let options = ListingOptions::default();
+    let config = EngineConfig {
+        max_requests: 3,
+        ..EngineConfig::default()
+    };
+    let partial =
+        Engine::new(&mut store, &source, config.clone()).list("stellar", &filter, options)?;
+    assert!(partial.partial);
+    let mut engine = Engine::new(&mut store, &source, config);
+    let resumed = engine.list("stellar", &filter, options)?;
+    assert!(!resumed.partial);
+    assert_eq!(ids(&resumed), ["a"]);
+    assert_eq!(ids(&engine.list("stellar", &filter, options)?), ["a"]);
+    source.complete();
     Ok(())
 }
