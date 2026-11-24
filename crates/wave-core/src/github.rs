@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use reqwest::Url;
+use reqwest::{header, Url};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,6 +156,9 @@ impl GitHubClient {
                 if response.etag.is_some() {
                     page.etag = response.etag;
                 }
+                if response.headers.contains_key(header::LINK) {
+                    page.next = next_url(&response.headers);
+                }
                 page
             }
             404 => CachedPage {
@@ -176,13 +179,7 @@ impl GitHubClient {
                     result.warn(format!("GitHub returned unexpected content for {url}"));
                     return Ok(cached);
                 }
-                let next = response
-                    .headers
-                    .get_all(reqwest::header::LINK)
-                    .iter()
-                    .filter_map(|header| header.to_str().ok())
-                    .find_map(next_link)
-                    .map(str::to_owned);
+                let next = next_url(&response.headers);
                 CachedPage {
                     body,
                     etag: response.etag,
@@ -300,6 +297,15 @@ fn safe_api_url(url: &str) -> bool {
             && url.fragment().is_none()
             && url.path().ends_with("/timeline")
     })
+}
+
+fn next_url(headers: &header::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::LINK)
+        .iter()
+        .filter_map(|header| header.to_str().ok())
+        .find_map(next_link)
+        .map(str::to_owned)
 }
 
 fn next_link(header: &str) -> Option<&str> {
