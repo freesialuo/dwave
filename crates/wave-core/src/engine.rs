@@ -880,13 +880,14 @@ fn cached_value<T>(
     }
 }
 
-enum IssueReference {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueReference {
     Id(String),
     GitHub(String, u64),
 }
 
 impl IssueReference {
-    fn parse(reference: &str) -> Result<Self> {
+    pub fn parse(reference: &str) -> Result<Self> {
         let reference = reference.trim();
         if is_uuid(reference) {
             return Ok(Self::Id(reference.to_ascii_lowercase()));

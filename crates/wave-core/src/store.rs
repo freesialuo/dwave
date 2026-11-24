@@ -259,7 +259,7 @@ impl Store {
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version) {
             tx.execute_batch(migration)
                 .with_context(|| format!("migrate cache to schema version {}", index + 1))?;
-            tx.pragma_update(None, "user_version", index + 1)?;
+            tx.pragma_update(None, "user_version", i64::try_from(index + 1)?)?;
         }
         tx.commit()?;
         Ok(Self { conn, path })
