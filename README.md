@@ -42,9 +42,29 @@ dwave watch check --json
 
 Replace the example repository and issue number with real values. `untouched` selects issues that have never had an application and have no Wave PR link. `--pending 0` is broader: it can include issues with earlier withdrawn or rejected applications. Other presets include `open-pending-0`, `unassigned`, `high-value`, and `repo`; inspect them with `dwave preset list`.
 
-Filters that require local evaluation can take more requests than server-filtered queries. Use `--explain` to inspect the plan, narrow the query where possible, and adjust `--max-requests` deliberately. `--offline` uses cached data; `--fresh` requests a refresh. JSON output includes a `dwave/v1` schema and metadata such as freshness, request count, warnings, and whether results are partial. Check that metadata before relying on a result. `--ndjson` is available for streaming records.
+Filters that require local evaluation can take more requests than server-filtered queries. Use `--explain` to inspect the plan and cached estimate without making requests; narrow the query where possible, and adjust `--max-requests` deliberately. `--offline` uses cached data; `--fresh` requests a refresh. JSON output includes a `dwave/v1` schema and metadata such as freshness, request count, warnings, and whether results are partial. Check that metadata before relying on a result. `--ndjson` is available for streaming records.
 
-`watch check` returns exit code 10 when changes are found, 0 when none are found, 1 on error, and 2 for usage errors. A scheduled job must account for 10 as a change signal. Use `watch log` to inspect history.
+`issues --new-since-last` seeds its baseline on the first complete run and returns no new matches then. Later runs return exit code 10 when new matches are found, even if the requested page is empty. `watch check` returns exit code 10 when changes are found, 0 when none are found, 1 on error, and 2 for usage errors. A scheduled job must account for 10 as a change signal. Use `watch log` to inspect history.
+
+For scheduled discovery, replace `watch check` in the following example with `issues --preset untouched --new-since-last`. For either command, handle the change exit code explicitly. This POSIX shell example also works with `set -e` because the command is in an `if` condition:
+
+```sh
+if dwave --json watch check > watch-changes.json; then
+  echo "No changes"
+else
+  status=$?
+  case "$status" in
+    10) echo "Changes found; inspect watch-changes.json" ;;
+    *) echo "Watch check failed ($status)" >&2; exit "$status" ;;
+  esac
+fi
+```
+
+## Configuration and GitHub access
+
+`dwave config get <key>` and `dwave config set <key> <value>` inspect and update the TOML configuration. For example, `dwave config set listing_ttl 10m` adjusts the listing freshness window. Durations use `s`, `m`, `h`, `d`, or `w`. The default program is `stellar`; change it with `dwave program use <slug>` or override it for one invocation with `--program <slug>`. For config and database paths, explicit `--config PATH` and `--db PATH` take precedence over `DWAVE_CONFIG` and `DWAVE_DB`, respectively, followed by platform defaults. `--max-requests` overrides the configured budget. Explicit filters override preset fields; repeated `--repo` or `--label` options replace the corresponding preset list. An explicit slug on `program show` takes precedence over `--program`.
+
+GitHub enrichment uses the first nonempty `GITHUB_TOKEN`, `GH_TOKEN`, or token returned by `gh auth token --hostname github.com`, in that order. Without a token it makes anonymous requests and warns about the lower quota. Tokens are resolved only when a GitHub network request is needed. In offline mode, watch checks and GitHub enrichment use cached observations; stale data is reported, and missing observations produce partial results and warnings. Check the output metadata before treating a cross-check as complete.
 
 ## Working with Wave
 
@@ -66,10 +86,15 @@ Tests should use fixtures rather than depend on the live Wave API. Changes to th
 
 ## Releasing
 
-The release workflow builds and tests native binaries and packages them for npm. Push a SemVer tag such as `v1.2.3` or `v1.2.3-rc.1` to run it; stable releases use the npm `latest` tag and prereleases use `next`.
+The release workflow builds and tests native binaries and packages them for npm. To prepare a release:
 
-The first npm publication requires a maintainer with npm 2FA to download the tested `npm-package` artifact from the tag run and publish its tarball with `npm publish /path/to/dwave-0.1.0.tgz --access public` (use the actual artifact name). Configure npm trusted publishing with the actual GitHub owner and repository, workflow `release.yml`, and environment `npm` before subsequent releases. Later publications use OIDC. If the OIDC job started before the initial publication, rerun the failed job after bootstrapping. No package is published merely by preparing this repository.
+1. Update the workspace package version in `Cargo.toml` and the version in `npm/package.json` to the same SemVer version; refresh `Cargo.lock` and run the development checks above.
+2. Commit the version updates, then push a matching tag such as `v1.2.3` or `v1.2.3-rc.1`. The workflow builds the `npm-package` artifact and publishes stable releases under `latest` and prereleases under `next`.
+3. For the first publication, an npm maintainer with 2FA must download the tested `npm-package` Actions artifact from that tag run and publish the contained tarball: `npm publish /path/to/dwave-0.1.0.tgz --access public` (substitute the actual filename; add `--tag next` for a prerelease). If the OIDC job started before bootstrap, rerun the failed job after manual publication; an identical published tarball is accepted as a no-op, so this does not validate trusted publishing.
+4. Configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) with the actual GitHub owner and repository, workflow filename `release.yml`, environment `npm`, and permission for direct `npm publish`. The first automated publish using a new configuration must succeed within two days, or the configuration expires and must be recreated. Configure it when the next release is ready. Subsequent releases use OIDC.
+
+Protect the GitHub environment and release tags as appropriate. Once OIDC works, npm recommends restricting token-based publishing. No package is published merely by preparing this repository.
 
 ## License
 
-Licensed under either of the MIT License or the Apache License, Version 2.0, at your option.
+Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.
