@@ -43,6 +43,11 @@ pub trait WaveSource {
     fn issues_page(&self, query: &RemoteQuery, cursor: Option<&str>) -> Result<Page<Issue>>;
     fn issue(&self, id: &str) -> Result<Option<Issue>>;
 
+    /// Resolve the public issue title for a cold GitHub reference lookup.
+    fn github_issue_title(&self, _repo: &str, _number: u64) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     fn remaining_requests(&self) -> Option<u64> {
         None
     }
@@ -184,9 +189,44 @@ impl WaveSource for HttpWaveSource {
         Ok(issue)
     }
 
+    fn github_issue_title(&self, repo: &str, number: u64) -> Result<Option<String>> {
+        let (owner, name) = repo
+            .split_once('/')
+            .context("expected a GitHub owner/repo")?;
+        validate_segment(owner)?;
+        validate_segment(name)?;
+        ensure!(
+            !name.contains('/') && number > 0,
+            "invalid GitHub issue reference"
+        );
+
+        let mut url = Url::parse("https://api.github.com").expect("valid GitHub API URL");
+        url.path_segments_mut()
+            .expect("HTTPS URL supports path segments")
+            .pop_if_empty()
+            .extend(["repos", owner, name, "issues", &number.to_string()]);
+        let mut request = GetRequest::new(url.as_str());
+        request.accept = Some("application/vnd.github+json".to_owned());
+        let fetched = self.gateway.get_json::<GitHubIssue>(request)?;
+        ensure!(fetched.status != 304, "unexpected HTTP 304 from GitHub");
+        Ok(fetched.body.and_then(|record| {
+            record
+                .pull_request
+                .is_none()
+                .then_some(record.title)
+                .flatten()
+        }))
+    }
+
     fn remaining_requests(&self) -> Option<u64> {
         Some(self.gateway.remaining().into())
     }
+}
+
+#[derive(Deserialize)]
+struct GitHubIssue {
+    title: Option<String>,
+    pull_request: Option<Value>,
 }
 
 #[derive(Deserialize)]

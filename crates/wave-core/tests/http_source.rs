@@ -219,6 +219,28 @@ fn issue_pagination_requires_completion_metadata_and_honors_last_page() -> Resul
 }
 
 #[test]
+fn cold_github_title_lookup_spends_one_request_and_ignores_prs() -> Result<()> {
+    let transport = FixtureTransport::new([
+        json_response(&json!({"title": "Wave search title", "unknownField": 7})),
+        json_response(&json!({"title": "This is a PR", "pull_request": {}})),
+    ]);
+    let gateway = transport.gateway(2);
+    let source = HttpWaveSource::new(gateway.clone());
+    assert_eq!(
+        source.github_issue_title("Owner/Repo", 177)?.as_deref(),
+        Some("Wave search title"),
+    );
+    assert_eq!(gateway.remaining(), 1);
+    assert_eq!(source.github_issue_title("Owner/Repo", 178)?, None);
+    assert_eq!(gateway.remaining(), 0);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests[0].url.host_str(), Some("api.github.com"));
+    assert_eq!(requests[0].url.path(), "/repos/Owner/Repo/issues/177");
+    assert_eq!(requests[0].bearer_token, None);
+    Ok(())
+}
+
+#[test]
 fn retries_across_hosts_share_budget_with_conditional_requests() -> Result<()> {
     let mut not_modified = response(304, b"");
     not_modified

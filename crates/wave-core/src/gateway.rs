@@ -140,6 +140,9 @@ impl HttpTransport for ReqwestTransport {
             ACCEPT,
             request.accept.as_deref().unwrap_or("application/json"),
         );
+        if url.host_str() == Some("api.github.com") && url.scheme() == "https" {
+            get = get.header("X-GitHub-Api-Version", "2026-03-10");
+        }
         if let Some(etag) = &request.etag {
             get = get.header(IF_NONE_MATCH, etag);
         }
