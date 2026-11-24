@@ -101,6 +101,7 @@ fn validates_filters_and_global_arguments_as_usage_errors() {
         &["issues", "--min-points", "100", "--max-points", "60"],
         &["issues", "--preset", "repo", "--explain"],
         &["config", "set", "max_requests", "0"],
+        &["config", "set", "wave_rate", "1e-100"],
     ] {
         let out = fixture.run(args);
         assert_status(&out, 2);
@@ -277,6 +278,35 @@ fn watch_reports_confirmed_changes_and_partial_errors_with_json() {
 }
 
 #[test]
+fn issue_show_keeps_wave_data_when_github_identity_is_invalid() {
+    let fixture = Fixture::new("invalid-github-identity");
+    fixture
+        .store()
+        .upsert_issue(
+            &json!({
+                "id": ISSUE_ID,
+                "title": "Wave issue with malformed repository metadata",
+                "gitHubIssueNumber": 77,
+                "repo": { "gitHubRepoFullName": "not an owner/repo" }
+            }),
+            Utc::now(),
+        )
+        .unwrap();
+
+    let issue = envelope(
+        &fixture.run(&["issue", "show", ISSUE_ID, "--github", "--offline", "--json"]),
+        0,
+    );
+    assert_eq!(issue["data"]["id"], ISSUE_ID);
+    assert_eq!(issue["meta"]["partial"], true);
+    assert!(issue["data"]["github"].is_null());
+    assert!(issue["meta"]["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("GitHub"));
+}
+
+#[test]
 fn renders_offline_program_waves_and_issue_pages_from_the_shared_store() {
     use wave_core::{
         engine::{Engine, EngineConfig, Freshness, ListingOptions},
@@ -308,6 +338,7 @@ fn renders_offline_program_waves_and_issue_pages_from_the_shared_store() {
                 json!({
                     "id": ISSUE_ID, "state": "open", "title": "First issue",
                     "waveProgramId": "stellar-id", "updatedAt": "2026-02-20T00:00:00Z",
+                    "gitHubIssueNumber": 77, "repo": {"gitHubRepoFullName": "org/project"},
                 }),
                 json!({
                     "id": MISSING_ID, "state": "open", "title": "Second issue",
@@ -439,4 +470,36 @@ fn renders_offline_program_waves_and_issue_pages_from_the_shared_store() {
         0,
     );
     assert_eq!(repeat["data"], json!([]));
+
+    let reference = "org/project#77";
+    envelope(
+        &fixture.run(&["watch", "add", reference, "--offline", "--json"]),
+        0,
+    );
+    envelope(&fixture.run(&["watch", "check", "--offline", "--json"]), 0);
+    fixture
+        .store()
+        .set_issue_missing(ISSUE_ID, Utc::now())
+        .unwrap();
+    let gone = envelope(&fixture.run(&["watch", "check", "--offline", "--json"]), 10);
+    assert_eq!(gone["data"][0]["type"], "disappeared");
+    let log = envelope(
+        &fixture.run(&[
+            "watch",
+            "log",
+            "https://github.com/Org/Project/issues/77",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(log["data"][0]["issue_id"], ISSUE_ID);
+    assert_eq!(log["data"][0]["changes"][0]["type"], "disappeared");
+    let removed = envelope(
+        &fixture.run(&["watch", "rm", reference, "--offline", "--json"]),
+        0,
+    );
+    assert_eq!(
+        removed["data"],
+        json!([{ "issue_id": ISSUE_ID, "removed": true }])
+    );
 }

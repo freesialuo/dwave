@@ -19,7 +19,7 @@ use wave_core::{
     engine::{Engine, EngineConfig, Freshness, IssueReference, ListingOptions, Refresh},
     filter::Filter,
     gateway::{Gateway, HostPolicy},
-    github::GitHubClient,
+    github::{GitHubClient, GitHubResult},
     source::HttpWaveSource,
     store::Store,
     watch::{WatchEntry, Watcher},
@@ -371,7 +371,14 @@ impl<'a> App<'a> {
         issue: &mut Value,
         meta: &mut render::Meta,
     ) -> Result<()> {
-        let enrichment = client.enrich_issue(&self.store, issue, self.freshness, self.now)?;
+        let enrichment = match client.enrich_issue(&self.store, issue, self.freshness, self.now) {
+            Ok(enrichment) => enrichment,
+            Err(error) => GitHubResult {
+                partial: true,
+                warnings: vec![format!("GitHub enrichment failed: {error:#}")],
+                ..GitHubResult::default()
+            },
+        };
         if let Some(fields) = issue.as_object_mut() {
             fields.insert("github".into(), to_json(enrichment.status)?);
             fields.insert("github_as_of".into(), to_json(enrichment.as_of)?);
@@ -462,8 +469,13 @@ impl<'a> App<'a> {
         reference: &str,
         freshness: Freshness,
     ) -> Result<String> {
-        if let IssueReference::Id(id) = IssueReference::parse(reference).map_err(usage)? {
-            return Ok(id);
+        match IssueReference::parse(reference).map_err(usage)? {
+            IssueReference::Id(id) => return Ok(id),
+            IssueReference::GitHub(repo, number) => {
+                if let Some(id) = self.store.cached_watch_reference(program, &repo, number)? {
+                    return Ok(id);
+                }
+            }
         }
         let refresh = self.resolve_issue(program, reference, freshness)?;
         Ok(issue_id(&refresh.data)?.into())

@@ -74,8 +74,10 @@ impl Config {
         }
         ensure!(self.max_requests > 0, "max_requests must be at least 1");
         ensure!(
-            self.wave_rate.is_finite() && self.wave_rate > 0.0,
-            "wave_rate must be a positive finite number"
+            self.wave_rate.is_finite()
+                && self.wave_rate > 0.0
+                && Duration::try_from_secs_f64(self.wave_rate.recip()).is_ok(),
+            "wave_rate must be positive and finite with a representable request interval"
         );
         ensure!(self.wave_burst > 0, "wave_burst must be at least 1");
         for (name, filter) in &self.presets {

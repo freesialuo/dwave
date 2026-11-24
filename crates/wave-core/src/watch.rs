@@ -10,7 +10,7 @@ use crate::engine::Freshness;
 use crate::filter::is_present;
 use crate::github::{GhIssueStatus, GitHubClient};
 use crate::source::{BudgetExhausted, WaveSource};
-use crate::store::Store;
+use crate::store::{record_id, Cached, Store};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WatchEntry {
@@ -163,18 +163,14 @@ impl<'a> Watcher<'a> {
         let mut result = WatchCheck::default();
         for entry in self.store.watchlist()? {
             let id = &entry.issue_id;
-            let mut cached = self.store.cached_issue_status(id)?;
+            let mut cached = self.store.cached_watch_observation(id)?;
+            if cached.is_none() && self.freshness == Freshness::Offline {
+                cached = self.store.cached_issue_status(id)?;
+            }
             let as_of = cached.as_ref().map(|issue| issue.fetched_at);
             if self.freshness.allows_fetch(as_of, self.issue_ttl, self.now) {
-                match self.source.issue(id) {
-                    Ok(Some(issue)) => {
-                        ensure!(
-                            issue["id"].as_str() == Some(id),
-                            "Wave returned a different issue for {id}"
-                        );
-                        self.store.upsert_issue(&issue, self.now)?;
-                    }
-                    Ok(None) => self.store.set_issue_missing(id, self.now)?,
+                let issue = match self.source.issue(id) {
+                    Ok(issue) => issue,
                     Err(error) => {
                         result.partial = true;
                         if error.downcast_ref::<BudgetExhausted>().is_some() {
@@ -184,9 +180,23 @@ impl<'a> Watcher<'a> {
                         }
                         continue;
                     }
+                };
+                if let Some(issue) = &issue {
+                    ensure!(
+                        issue["id"].as_str() == Some(id),
+                        "Wave returned a different issue for {id}"
+                    );
+                    self.store.upsert_issue(issue, self.now)?;
+                } else {
+                    self.store.set_issue_missing(id, self.now)?;
                 }
-                // Use the persisted precision and respect a concurrent newer refresh.
-                cached = self.store.cached_issue_status(id)?;
+                self.store
+                    .record_watch_observation(id, issue.as_ref(), self.now)?;
+                cached = self.store.cached_watch_observation(id)?;
+                if cached.is_none() {
+                    // The user removed this issue while the request was in flight.
+                    continue;
+                }
             } else if let Some(cached) = &cached {
                 if Freshness::Default.allows_fetch(as_of, self.issue_ttl, self.now) {
                     result.warn(format!(
@@ -235,6 +245,54 @@ impl<'a> Watcher<'a> {
 }
 
 impl Store {
+    /// Resolve a cached identity for a watch operation, even after the issue disappears.
+    pub fn cached_watch_reference(
+        &self,
+        program: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<String>> {
+        let Some(program) = self.cached_program(&program.to_ascii_lowercase())? else {
+            return Ok(None);
+        };
+        self.cached_issue_reference(record_id(&program.data)?, repo, number)
+    }
+
+    fn cached_watch_observation(&self, id: &str) -> Result<Option<Cached<Option<Value>>>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT raw_json, fetched_at FROM watch_observations WHERE issue_id=?1",
+                [id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        row.map(|(raw, millis)| {
+            Ok(Cached {
+                data: raw.as_deref().map(serde_json::from_str).transpose()?,
+                fetched_at: DateTime::from_timestamp_millis(millis)
+                    .context("invalid watch observation timestamp")?,
+            })
+        })
+        .transpose()
+    }
+
+    fn record_watch_observation(
+        &self,
+        id: &str,
+        issue: Option<&Value>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO watch_observations(issue_id,raw_json,fetched_at)
+             SELECT ?1,?2,?3 WHERE EXISTS (SELECT 1 FROM watchlist WHERE issue_id=?1)
+             ON CONFLICT(issue_id) DO UPDATE SET raw_json=excluded.raw_json,fetched_at=excluded.fetched_at
+             WHERE excluded.fetched_at>=watch_observations.fetched_at",
+            params![id, issue.map(serde_json::to_string).transpose()?, now.timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
     pub fn watch_add(&self, id: &str, note: Option<&str>, now: DateTime<Utc>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO watchlist(issue_id,note,added_at) VALUES(?1,?2,?3)
@@ -607,6 +665,41 @@ mod tests {
         assert_eq!(stale.as_of, Some(time));
         assert!(stale.warnings[0].contains("stale Wave cache"));
         assert!(store.watch_log(None, None)?[0].snapshot.present);
+        Ok(())
+    }
+
+    #[test]
+    fn listing_refresh_does_not_delay_watched_issue_detail_refresh() -> Result<()> {
+        let mut store = Store::memory()?;
+        let source = Fixture(RefCell::new(VecDeque::from([
+            Ok(Some(json!({"id": ID, "pendingApplicationsCount": 0}))),
+            Ok(Some(json!({"id": ID, "pendingApplicationsCount": 1}))),
+        ])));
+        let start = now();
+        store.watch_add(ID, None, start)?;
+        let baseline =
+            Watcher::new(&mut store, &source, start, TTL, Freshness::Default).check(None)?;
+        assert!(baseline.changes.is_empty());
+
+        store.upsert_issue(
+            &json!({"id": ID, "pendingApplicationsCount": 0}),
+            start + TimeDelta::seconds(299),
+        )?;
+        let expiry = start + TimeDelta::seconds(301);
+        let check =
+            Watcher::new(&mut store, &source, expiry, TTL, Freshness::Default).check(None)?;
+        assert!(matches!(
+            check.changes.as_slice(),
+            [ChangeEvent {
+                kind: ChangeKind::ApplicationsChanged {
+                    from: Some(0),
+                    to: Some(1)
+                },
+                ..
+            }]
+        ));
+        assert_eq!(check.as_of, Some(expiry));
+        assert!(source.0.borrow().is_empty());
         Ok(())
     }
 

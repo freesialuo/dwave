@@ -105,7 +105,14 @@ CREATE TABLE discovery_results (
 );
 CREATE INDEX discovery_results_order ON discovery_results(name, position);";
 
-const MIGRATIONS: &[&str] = &[SCHEMA, DISCOVERY_RESULTS];
+const WATCH_OBSERVATIONS: &str = "
+CREATE TABLE watch_observations (
+    issue_id TEXT PRIMARY KEY NOT NULL REFERENCES watchlist(issue_id) ON DELETE CASCADE,
+    raw_json TEXT,
+    fetched_at INTEGER NOT NULL
+);";
+
+const MIGRATIONS: &[&str] = &[SCHEMA, DISCOVERY_RESULTS, WATCH_OBSERVATIONS];
 
 pub struct Store {
     pub(crate) conn: Connection,
