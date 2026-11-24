@@ -150,17 +150,23 @@ impl WaveSource for HttpWaveSource {
         for issue in &result.data {
             ensure_record(issue, "issue")?;
         }
-        let next_cursor = result
+        let pagination = result
             .pagination
+            .context("Wave issue listing omitted pagination")?;
+        let cursor = pagination
             .next_cursor
-            .filter(|cursor| !cursor.is_empty());
-        ensure!(
-            result.pagination.has_next_page != Some(true) || next_cursor.is_some(),
-            "Wave pagination indicates another page but omitted its cursor"
-        );
+            .filter(|cursor| !cursor.trim().is_empty());
+        let next_cursor = match (pagination.has_next_page, cursor) {
+            (Some(false), _) => None,
+            (_, Some(cursor)) => Some(cursor),
+            (Some(true), None) => {
+                bail!("Wave pagination indicates another page but omitted its cursor")
+            }
+            (None, None) => bail!("Wave issue pagination omitted completion metadata"),
+        };
         Ok(Page {
             data: result.data,
-            total: result.pagination.total,
+            total: pagination.total,
             next_cursor,
         })
     }
@@ -186,11 +192,10 @@ impl WaveSource for HttpWaveSource {
 #[derive(Deserialize)]
 struct WirePage<T> {
     data: Vec<T>,
-    #[serde(default)]
-    pagination: WirePagination,
+    pagination: Option<WirePagination>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePagination {
     total: Option<u64>,
