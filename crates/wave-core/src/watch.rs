@@ -97,6 +97,7 @@ pub enum ChangeKind {
         from: Option<u64>,
         to: Option<u64>,
     },
+    #[serde(rename = "github_changed")]
     GitHubChanged {
         from: GhIssueStatus,
         to: GhIssueStatus,
@@ -645,6 +646,7 @@ mod tests {
         assert!(
             matches!(&changes[..], [ChangeEvent { kind: ChangeKind::GitHubChanged { to, .. }, .. }] if to == &github)
         );
+        assert_eq!(serde_json::to_value(&changes[0])?["type"], "github_changed");
         Ok(())
     }
 }
