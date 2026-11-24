@@ -1,54 +1,200 @@
 # dwave
 
-An unofficial, read-only command-line tool for discovering and tracking issues in Drips Wave programs. It is not affiliated with Drips. The Wave API is undocumented and may change without notice.
+An unofficial, read-only command-line tool and Rust library for discovering, caching, and tracking issues in [Drips Wave](https://www.drips.network) programs.
 
-`dwave` combines issue discovery, a local cache, and an on-demand watchlist. It is intended for contributors who want to find work and follow changes without repeatedly scanning an entire program. A reusable Rust library lives alongside the CLI.
+> [!NOTE]
+> `dwave` is not affiliated with or endorsed by Drips. The Wave HTTP API (`https://wave-api.drips.network`) is undocumented and may change without notice. `dwave` never applies to issues or posts comments.
 
-## Getting started
+`dwave` combines server-filtered and local issue queries, a persistent SQLite cache with client-side rate limiting and request budgets, optional GitHub cross-checking, and an on-demand watchlist with snapshot history and script-friendly exit codes.
 
-Install the CLI from npm with Node.js 22 or newer:
+## Installation
+
+### From npm (recommended)
+
+Install globally with Node.js 22 or newer:
 
 ```sh
 npm install -g @freesialuo/dwave
 dwave --help
 ```
 
-The npm package targets macOS arm64/x64, Linux glibc arm64/x64 (Ubuntu 22.04 baseline), and Windows x64. To build and run it from a Rust checkout:
+Or run without installing globally:
 
 ```sh
-cargo run --release -- --help
+npx @freesialuo/dwave --help
 ```
 
-Use `dwave <command> --help` for the available options. The CLI can emit machine-readable JSON for scripts and the companion [skill](skills/dwave/SKILL.md).
+The `@freesialuo/dwave` package bundles prebuilt native binaries for:
 
-## Discover and track issues
+- `darwin-arm64` (macOS Apple Silicon)
+- `darwin-x64` (macOS Intel)
+- `linux-arm64` (Linux glibc, Ubuntu 22.04 baseline)
+- `linux-x64` (Linux glibc, Ubuntu 22.04 baseline)
+- `win32-x64` (Windows x64)
+
+### From source (Rust)
+
+Clone the repository and build with Cargo:
 
 ```sh
-# Choose a program and inspect its waves.
+git clone https://github.com/freesialuo/dwave.git
+cd dwave
+cargo install --path crates/dwave
+dwave --help
+```
+
+Or run directly from a checkout without installing:
+
+```sh
+cargo run --release -p dwave -- --help
+```
+
+## Quick Start
+
+```sh
+# Select a Wave program and view its active wave.
 dwave program use stellar
 dwave waves --current
 
-# Browse a server-filtered preset or narrow a query.
+# Browse a cheap server-filtered preset, or inspect a custom query plan first.
 dwave issues --preset untouched --limit 20
 dwave issues --repo owner/repo --pending 0 --no-pr --explain
 
-# Inspect an issue, then add it to the local watchlist.
+# Inspect a specific issue with GitHub cross-checking, then watch it.
 dwave issue show 'owner/repo#123' --github
-dwave watch add 'owner/repo#123'
+dwave watch add 'owner/repo#123' --note 'Good candidate'
 dwave watch list
-dwave watch check --json
+dwave watch check --github --json
 ```
 
-Replace the example repository and issue number with real values. `untouched` selects issues that have never had an application and have no Wave PR link. `--pending 0` is broader: it can include issues with earlier withdrawn or rejected applications. Other presets include `open-pending-0`, `unassigned`, `high-value`, and `repo`; inspect them with `dwave preset list`.
+Replace `owner/repo` and `123` with a real repository and issue number. Issue references (`<ref>`) accept a Wave UUID, `OWNER/REPO#N`, or a GitHub issue URL (`https://github.com/OWNER/REPO/issues/N`).
 
-Filters that require local evaluation can take more requests than server-filtered queries. Use `--explain` to inspect the plan and cached estimate without making requests; narrow the query where possible, and adjust `--max-requests` deliberately. `--offline` uses cached data; `--fresh` requests a refresh. JSON output includes a `dwave/v1` schema and metadata such as freshness, request count, warnings, and whether results are partial. Check that metadata before relying on a result. `--ndjson` is available for streaming records.
+## CLI Reference
 
-`issues --new-since-last` seeds its baseline on the first complete run and returns no new matches then. Later runs retain matches that have not yet been delivered across pages. Both discovery and `watch check` return 10 for confirmed changes, 0 for a complete check with no changes, 1 for an error or a partial check without confirmed changes, and 2 for usage errors. A partial check with confirmed changes still returns 10, so always inspect `meta.partial` and warnings. A scheduled job must account for 10 as a change signal. Use `watch log` to inspect history.
+Run `dwave <command> --help` for full option details on any subcommand.
 
-For scheduled discovery, replace `watch check` in the following example with `issues --preset untouched --new-since-last`. For either command, handle the change exit code explicitly. This POSIX shell example also works with `set -e` because the command is in an `if` condition:
+### Commands
+
+| Command | Description |
+|---|---|
+| `dwave program show [<slug>]` | Show details for `<slug>` or the active program |
+| `dwave program use <slug>` | Persist `<slug>` as `default_program` |
+| `dwave waves [--current]` | List waves in the selected program (`--current` filters to active waves) |
+| `dwave issues [filters] [options]` | Query issues (after an implicit refresh when stale) |
+| `dwave sync [--scope <preset>] [filters] [--full] [--explain]` | Populate or refresh the local cache for a scope |
+| `dwave issue show <ref> [--github]` | Inspect one issue (with optional GitHub state, assignees, and timeline PRs) |
+| `dwave watch add <ref>... [--note <text>]` | Add one or more issues to the local watchlist |
+| `dwave watch rm <ref>...` | Remove one or more issues from the watchlist |
+| `dwave watch list` | List watched issues and their notes |
+| `dwave watch check [--github]` | Refresh watched issues and report changes since the last snapshot |
+| `dwave watch log [<ref>] [--since <dur>]` | Show snapshot and change history (default `--since 7d`) |
+| `dwave preset list` | List built-in and saved filter presets with estimated costs |
+| `dwave preset save <name> [filters]` | Save a custom filter preset in `config.toml` |
+| `dwave preset rm <name>` | Delete a custom preset or hide a built-in preset |
+| `dwave cache stats` | Show row counts across the local SQLite cache |
+| `dwave cache prune [--older-than <dur>]` | Prune cached entries older than `<dur>` (default `30d`) |
+| `dwave config get <key>` | Read a configuration setting |
+| `dwave config set <key> <value>` | Validate and persist a configuration setting |
+
+### Global Options
+
+| Option | Env / Notes |
+|---|---|
+| `--program <slug>` | Override `default_program` for one invocation (positional `<slug>` on `program show` takes precedence) |
+| `--json` | Emit a single `dwave/v1` JSON envelope (conflicts with `--ndjson`) |
+| `--ndjson` | Stream one `dwave/v1` JSON envelope per record |
+| `--db <path>` | Override the SQLite cache path (`DWAVE_DB` env var, else platform data dir) |
+| `--config <path>` | Override the TOML config path (`DWAVE_CONFIG` env var, else platform config dir) |
+| `-v`, `--verbose` | Print request, retry, `304` unchanged, and byte metrics to `stderr` |
+| `--no-color` | Disable ANSI color in human output (also respects `NO_COLOR`) |
+| `--fresh` | Bypass TTLs and refresh requested data (conflicts with `--offline`) |
+| `--offline` | Serve strictly from the local cache without network requests |
+| `--max-requests <n>` | Override the per-invocation HTTP request cap (`>= 1`, includes retries and GitHub calls) |
+
+### Filtering, Presets, and Query Modes
+
+`dwave issues` and `dwave sync` support `--preset <name>` / `--scope <preset>` plus explicit filter flags. Explicit flags override preset fields; repeating `--repo` or `--label` replaces the preset's corresponding list. `issues` also accepts `--sort updated|points|created` (default `updated`), `--limit <n>` (default `20`), `--page <n>` (default `1`), `--new-since-last`, `--github`, `--full`, and `--explain`.
+
+**Server-pushed vs. local filters:**
+
+- **Server-pushed** (evaluated remotely and re-checked locally): `--state <state|all>` (default `open`), `--never-applied` / `--has-applications`, `--has-pr` / `--no-pr`, `--search <text>`, plus a single `--repo <OWNER/REPO>` once its Wave repository UUID is known in cache.
+- **Local-only** (require syncing the matching remote scope first): `--pending <N|N..=M|..=M|N..>`, `--assigned` / `--unassigned`, `--min-points <n>`, `--max-points <n>`, repeatable `--label <name>` (AND), multiple `--repo <OWNER/REPO>` (OR), `--updated-since <dur>`, and `--sort points|created`.
+
+**Execution modes (inspect with `--explain` without making requests):**
+
+- **Passthrough**: When every active filter and sort is server-pushable (and `--full` / `--new-since-last` are not set), `dwave` fetches only enough pages to satisfy `--limit` and `--page`.
+- **Scoped sync**: When any predicate or sort requires local evaluation, `dwave` syncs the narrowest remote scope into SQLite. Subsequent runs within `listing_ttl` make zero requests; afterwards they run incremental `updatedAt` syncs with an overlap window (`overlap`) and an automatic full resync every `full_interval` (24h) when the estimated page count fits the remaining budget. If `--max-requests` is hit mid-sync, `dwave` saves the cursor so the next run resumes and marks `meta.partial = true`. Overlapping runs in separate processes take an advisory scope lock and fall back to cached results with a warning rather than fetching twice.
+
+**Built-in presets (`dwave preset list`):**
+
+| Preset | Filter | Cost | Notes |
+|---|---|---|---|
+| `untouched` | `state=open`, `--never-applied`, `--no-pr` | `cheap` | Narrower than `--pending 0`: excludes issues with earlier withdrawn or rejected applications |
+| `open-pending-0` | `state=open`, `--pending 0`, `--unassigned`, `--no-pr` | `broad` | Includes issues with past non-pending applications; combine with `--repo` or raise `--max-requests` |
+| `unassigned` | `state=open`, `--unassigned`, `--no-pr` | `broad` | Open unassigned issues with no Wave PR link |
+| `high-value` | `state=open`, `--unassigned`, `--min-points <high_value_min_points>` | `broad` | Default threshold is `1000` (configurable via `dwave config set high_value_min_points <n>`) |
+| `repo` | `state=open` | `repository-dependent` | Requires at least one `--repo OWNER/REPO` |
+
+When saving a preset with `dwave preset save`, omitted `--state` defaults to `open`; pass `--state all` to match any state.
+
+## JSON Output, Watch Events, and Automation
+
+### `dwave/v1` Envelope
+
+Passing `--json` outputs a single JSON document; `--ndjson` emits one envelope per record for array views:
+
+```json
+{
+  "schema": "dwave/v1",
+  "meta": {
+    "program": "stellar",
+    "as_of": "2026-11-24T21:00:00Z",
+    "partial": false,
+    "warnings": [],
+    "requests": 2,
+    "retries": 0,
+    "not_modified": 0,
+    "bytes": 18432
+  },
+  "data": [],
+  "page": {
+    "page": 1,
+    "limit": 20,
+    "total": 42
+  }
+}
+```
+
+Always inspect `meta.partial`, `meta.as_of`, and `meta.warnings` before treating results as complete.
+
+### Watch Events
+
+`watch check` refreshes each watched issue via the single-issue endpoint (respecting `issue_ttl`), optionally enriches via GitHub (`--github`), and diffs against the previous snapshot:
+
+- `applications_changed` (`from`, `to`)
+- `assigned` (`who`) / `unassigned`
+- `assignees_changed` (`from`, `to`)
+- `pr_linked` (`url`) / `pr_unlinked` (`url`)
+- `state_changed` (`from`, `to`)
+- `points_changed` (`from`, `to`)
+- `github_changed` (`from`, `to`)
+- `disappeared` / `reappeared`
+
+The first successful `watch check` for an issue seeds its baseline snapshot without emitting changes. Similarly, `issues --new-since-last` seeds its baseline on the first complete run (returning no items) and delivers newly seen matches on subsequent runs, retaining any matches not yet delivered across pages.
+
+### Exit Codes & Scheduled Jobs
+
+| Exit Code | Meaning |
+|---|---|
+| `0` | Success (for `watch check` and `issues --new-since-last`: complete check with no changes) |
+| `10` | Confirmed changes found (`watch check` or `issues --new-since-last`, even when `meta.partial` is `true`) |
+| `1` | Runtime error, or a partial `watch check` / `--new-since-last` run with no confirmed changes |
+| `2` | CLI usage or validation error |
+
+Watch checks run on demand; invoke `dwave` from `cron`, `launchd`, or CI and handle exit code `10` explicitly (the `if` condition below is safe under `set -e`):
 
 ```sh
-if dwave --json watch check > watch-changes.json; then
+if dwave --json watch check --github > watch-changes.json; then
   echo "No changes"
 else
   status=$?
@@ -59,62 +205,74 @@ else
 fi
 ```
 
-## Configuration and GitHub access
+Replace `watch check --github` with `issues --preset untouched --new-since-last` for scheduled discovery.
 
-`dwave config get <key>` and `dwave config set <key> <value>` inspect and update the TOML configuration. For example, `dwave config set listing_ttl 10m` adjusts the listing freshness window. Durations use `s`, `m`, `h`, `d`, or `w`. The default program is `stellar`; change it with `dwave program use <slug>` or override it for one invocation with `--program <slug>`. For config and database paths, explicit `--config PATH` and `--db PATH` take precedence over `DWAVE_CONFIG` and `DWAVE_DB`, respectively, followed by platform defaults. `--max-requests` overrides the configured budget. Explicit filters override preset fields; repeated `--repo` or `--label` options replace the corresponding preset list. An explicit slug on `program show` takes precedence over `--program`.
+## Configuration & GitHub Access
 
-GitHub enrichment uses the first nonempty `GITHUB_TOKEN`, `GH_TOKEN`, or token returned by `gh auth token --hostname github.com`, in that order. Without a token it makes anonymous requests and warns about the lower quota. Tokens are resolved only when a GitHub network request is needed. In offline mode, watch checks and GitHub enrichment use cached observations; stale data is reported, and missing observations produce partial results and warnings. Check the output metadata before treating a cross-check as complete.
+`dwave` stores configuration in TOML (`config.toml` in the platform config directory, e.g. `~/Library/Application Support/dwave/config.toml` on macOS or `~/.config/dwave/config.toml` on Linux) and cache data in SQLite (`dwave.db` in the platform data directory).
 
-## Working with Wave
+### Configuration Keys
 
-Wave's issue information can change between requests. Cached data is a snapshot, not a guarantee that an issue is still available. Before applying, check the issue on Wave and GitHub. In particular, a missing Wave PR link does not prove that no pull request exists.
+Durations accept `<n>s`, `<n>m`, `<n>h`, `<n>d`, or `<n>w`.
 
-The client makes read-only requests to Wave and GitHub. Resolving an uncached `owner/repo#N` or GitHub issue URL may request the public GitHub issue title even without `--github`, then match the Wave repository and issue number exactly. `--offline` suppresses that lookup. It does not apply to issues or post comments. Watch checks run on demand; use your own scheduler if you want periodic checks.
+| Key | Default | Meaning |
+|---|---|---|
+| `default_program` | `"stellar"` | Default Wave program slug |
+| `program_ttl` | `"7d"` | Cache TTL for program metadata |
+| `waves_ttl` | `"6h"` | Cache TTL for wave listings |
+| `listing_ttl` | `"10m"` | Cache TTL for issue query scopes |
+| `issue_ttl` | `"5m"` | Cache TTL for single-issue refreshes (`issue show`, `watch check`) |
+| `github_ttl` | `"30m"` | Cache TTL for GitHub issue and timeline checks |
+| `overlap` | `"10m"` | Lookback overlap for incremental `updatedAt` syncs |
+| `full_interval` | `"24h"` | Interval for automatic full resyncs when within request budget |
+| `max_requests` | `50` | Default per-invocation HTTP request budget |
+| `wave_rate` | `2.0` | Token-bucket rate limit (requests/sec) for `wave-api.drips.network` |
+| `wave_burst` | `4` | Token-bucket burst size for `wave-api.drips.network` |
+| `high_value_min_points` | `1000` | Minimum points used by the built-in `high-value` preset |
+| `hidden_presets` | `[]` | Built-in preset names hidden by `dwave preset rm` |
+
+### GitHub Cross-Checking & Caveats
+
+- **Token resolution**: When a GitHub API request is needed, `dwave` uses the first nonempty value from `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token --hostname github.com`. Without a token it makes anonymous requests (60 requests/hour) and emits a warning.
+- **Conditional caching**: `--github` fetches `/repos/{owner}/{repo}/issues/{n}` and `/timeline` using `If-None-Match` (`ETag` / `304 Not Modified`) and caches results in SQLite.
+- **Cold reference lookups**: Resolving an uncached `OWNER/REPO#N` or GitHub issue URL may fetch the public GitHub issue title even without `--github` to narrow Wave's search before verifying an exact repo/number match. `--offline` suppresses that lookup.
+- **Wave snapshot caveats**: Wave data can change between requests, and a missing Wave `prLink` does not prove no PR exists on GitHub. Always check `--github` and verify availability on Wave and GitHub before applying.
+
+## Companion Agent Skill & Rust Library
+
+- **Agent Skill**: [`skills/dwave/SKILL.md`](https://github.com/freesialuo/dwave/blob/main/skills/dwave/SKILL.md) provides concise rules and JSON recipes for AI coding agents driving `dwave`.
+- **Rust Library (`wave-core`)**: [`crates/wave-core`](https://github.com/freesialuo/dwave/tree/main/crates/wave-core) exposes the synchronous `Engine`, `HttpWaveSource`, `Gateway` (budget, rate limiting, retries), SQLite `Store`, `Watcher`, `GitHubClient`, and typed `Issue`, `IssueState`, `Program`, `Repo`, `Wave`, and `WaveStatus` projections (`TryFrom<&serde_json::Value>`) that retain unrecognized fields in `extra`.
 
 ## Development
 
-The Cargo workspace separates the `wave-core` library from the `dwave` binary. Run the standard checks from the repository root:
+The Cargo workspace separates [`crates/wave-core`](https://github.com/freesialuo/dwave/tree/main/crates/wave-core) from the [`crates/dwave`](https://github.com/freesialuo/dwave/tree/main/crates/dwave) CLI binary. All CI tests run offline against recorded fixtures rather than the live Wave API:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+node --test scripts/npm-release.test.mjs
 ```
 
-Tests should use fixtures rather than depend on the live Wave API. Changes to the JSON output used by scripts and the skill should be treated as compatibility changes.
+Changes to the `dwave/v1` JSON structure should preserve backwards compatibility for scripts and the companion skill.
 
 ## Releasing
 
-The release workflow builds and tests native binaries and uploads the tested `npm-package` tarball for a matching release tag. Publishing is disabled until the repository Actions variable `NPM_TRUSTED_PUBLISHING_ENABLED` is set to `true`.
+Tag pushes matching `vX.Y.Z` or `vX.Y.Z-<prerelease>` (without build metadata) trigger [`.github/workflows/release.yml`](https://github.com/freesialuo/dwave/blob/main/.github/workflows/release.yml):
 
-### One-time setup
-
-1. Confirm that the publishing account owns the `@freesialuo` scope or has permission to publish [@freesialuo/dwave](https://www.npmjs.com/package/@freesialuo/dwave). Create an npm account, verify its email, and [enable two-factor authentication](https://docs.npmjs.com/configuring-two-factor-authentication/) for the maintainer account.
-2. In the GitHub repository, enable Actions and create an environment named `npm` under **Settings → Environments**. Configure any desired reviewers and deployment restrictions; if using selected branches and tags, explicitly allow the release tags. Availability of environments and protection rules depends on repository visibility and plan; see [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments). Protect release tags as appropriate.
-3. For a new scoped release, download the `npm-package` artifact from its completed tag run. The pack job stages the native binaries and runs `npm pack` on the staged package. Compare the downloaded tarball's SHA-512 integrity with the `integrity` output in that run's **Verify archive contents, metadata, and integrity** step. This Node.js command works on macOS, Linux, and Windows (substitute the downloaded path):
-
+1. Update `[workspace.package].version` in `Cargo.toml` and `"version"` in `npm/package.json` to the same SemVer string, refresh `Cargo.lock` (`cargo check --workspace`), and run the checks above plus:
    ```sh
-   node -e "const fs=require('node:fs'),c=require('node:crypto'); console.log('sha512-'+c.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64'))" /path/to/freesialuo-dwave-0.1.0.tgz
+   node scripts/npm-release.mjs validate vX.Y.Z
    ```
-
-   Proceed only if it matches. The original `v0.1.0` Actions artifact was unscoped. Its locally repacked scoped tarball, `freesialuo-dwave-0.1.0.tgz`, contains the same binaries but has a different digest; do not compare it to the original artifact's integrity as if it were the same archive. On a machine logged in as the npm maintainer, publish the verified scoped tarball, responding to the 2FA prompt:
-
+2. Create a signed commit and matching signed tag, then push both to GitHub:
    ```sh
-   npm login
-   npm publish /path/to/freesialuo-dwave-0.1.0.tgz --access public
+   git tag -s vX.Y.Z -m "vX.Y.Z"
+   git push origin main vX.Y.Z
    ```
-
-   Replace the filename with the actual tarball. For a prerelease, add `--tag next`. Check the package name and version before publishing: npm versions cannot be reused. If npm stages a release for approval, an authorized package maintainer must approve it before it becomes publicly available. The existing `0.0.0-stage` placeholder establishes the package; use an unpublished version for the first trusted publish.
-4. When the next unpublished release is ready, configure [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) in the package's **Settings → Trusted publishing**. Select GitHub Actions, enter the actual GitHub owner and repository, workflow filename `release.yml` (filename only), and environment `npm`; enable direct `npm publish`. In GitHub, set the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` to `true` under **Settings → Secrets and variables → Actions → Variables**. The first successful publish with a new trusted publisher must occur within two days, or the configuration expires and must be recreated. A matching existing version is a no-op, so use a new version to validate OIDC. After a successful trusted publish, consider restricting token-based publishing as npm recommends.
-
-### Each release
-
-1. Update the workspace package version in `Cargo.toml` and the version in `npm/package.json` to the same SemVer version. Refresh `Cargo.lock` and run the development checks above.
-2. Commit the version updates and push a matching tag such as `v1.2.3` or `v1.2.3-rc.1`. The tag must not include build metadata. GitHub Actions builds and tests the native binaries, verifies the tarball, and uploads `npm-package`. When publishing is enabled, it publishes stable versions under `latest` and prereleases under `next` through OIDC.
-3. Check the Actions run and the published package. A rerun accepts an existing version only when its registry integrity matches the tested tarball; a different tarball fails. A successful no-op does not validate trusted publishing or change a dist-tag. Trusted publishing uses GitHub-hosted runners, and npm automatically generates provenance for a public package published from a public repository.
-
-No package is published merely by preparing this repository.
+3. GitHub Actions builds and smoke-tests all five native targets (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`), packs `@freesialuo/dwave`, verifies archive contents and SHA-512 integrity, uploads the `npm-package` artifact, and publishes via npm OIDC trusted publishing (`NPM_TRUSTED_PUBLISHING_ENABLED=true`, `npm` environment) with SLSA provenance—using dist-tag `latest` for stable versions and `next` for prereleases. Rerunning a tag workflow succeeds as a no-op only if the registry tarball integrity matches byte-for-byte.
+4. The `npm` environment requires a maintainer's approval: the publish job waits until a required reviewer approves it under **Review deployments** on the workflow run page.
+5. After publishing, npm may take several minutes to process the release. The version metadata can appear before the tarball, which may return `404` until processing finishes; confirm with `npm view @freesialuo/dwave@X.Y.Z dist.integrity` and a fresh `npm pack @freesialuo/dwave@X.Y.Z`.
 
 ## License
 
-Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+Licensed under either the [MIT License](https://github.com/freesialuo/dwave/blob/main/LICENSE-MIT) or the [Apache License, Version 2.0](https://github.com/freesialuo/dwave/blob/main/LICENSE-APACHE), at your option.

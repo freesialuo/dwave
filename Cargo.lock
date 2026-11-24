@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "dwave"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "wave-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",

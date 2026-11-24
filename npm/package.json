@@ -1,7 +1,21 @@
 {
   "name": "@freesialuo/dwave",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Unofficial command-line client for Drips Wave programs",
+  "homepage": "https://github.com/freesialuo/dwave#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/freesialuo/dwave.git"
+  },
+  "bugs": {
+    "url": "https://github.com/freesialuo/dwave/issues"
+  },
+  "keywords": [
+    "drips",
+    "drips-wave",
+    "cli",
+    "github-issues"
+  ],
   "license": "MIT OR Apache-2.0",
   "bin": {
     "dwave": "bin/dwave.cjs"
