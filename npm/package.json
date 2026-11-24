@@ -1,0 +1,17 @@
+{
+  "name": "dwave",
+  "version": "0.1.0",
+  "description": "Unofficial command-line client for Drips Wave programs",
+  "license": "MIT OR Apache-2.0",
+  "bin": {
+    "dwave": "bin/dwave.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": ["bin/", "native/", "targets.json", "LICENSE-MIT", "LICENSE-APACHE"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
