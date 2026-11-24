@@ -6,10 +6,11 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::engine::Freshness;
 use crate::filter::is_present;
 use crate::github::{GhIssueStatus, GitHubClient};
 use crate::source::{BudgetExhausted, WaveSource};
-use crate::store::{Freshness, Store};
+use crate::store::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WatchEntry {
@@ -439,4 +440,212 @@ fn events(
         _ => {}
     }
     changes
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use chrono::TimeDelta;
+    use serde_json::json;
+
+    use super::*;
+    use crate::source::{Issue, Page, Program, RemoteQuery, Wave};
+
+    const ID: &str = "12fd5c8a-7fbe-4875-988e-6486ac9d7848";
+    const TTL: Duration = Duration::from_secs(300);
+
+    struct Fixture(RefCell<VecDeque<Result<Option<Issue>>>>);
+
+    impl WaveSource for Fixture {
+        fn issue(&self, id: &str) -> Result<Option<Issue>> {
+            assert_eq!(id, ID);
+            self.0
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected Wave request")
+        }
+
+        fn program(&self, _: &str) -> Result<Program> {
+            panic!("watch uses the single-issue endpoint")
+        }
+
+        fn waves(&self, _: &str, _: u32) -> Result<Vec<Wave>> {
+            panic!("watch uses the single-issue endpoint")
+        }
+
+        fn issues_page(&self, _: &RemoteQuery, _: Option<&str>) -> Result<Page<Issue>> {
+            panic!("watch uses the single-issue endpoint")
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        "2026-11-24T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn watch_uses_ttl_and_logs_real_transitions_once() -> Result<()> {
+        let mut store = Store::memory()?;
+        let source = Fixture(RefCell::new(VecDeque::from([
+            Ok(Some(json!({
+                "id": ID, "pendingApplicationsCount": 0, "assignedApplicant": null,
+                "assignees": [], "prLink": null, "state": "open", "points": 100,
+            }))),
+            Ok(Some(json!({
+                "id": ID, "pendingApplicationsCount": 2, "assignedApplicant": {"id": "alice"},
+                "assignees": ["alice"], "prLink": "https://github.com/o/r/pull/2",
+                "state": "in_progress", "points": 250,
+            }))),
+            Err(BudgetExhausted.into()),
+            Ok(None),
+        ])));
+        let start = now();
+        store.watch_add(ID, Some("candidate"), start)?;
+        store.watch_add(ID, None, start + TimeDelta::seconds(1))?;
+        assert_eq!(store.watchlist()?[0].note.as_deref(), Some("candidate"));
+        assert_eq!(store.watchlist()?[0].added_at, start);
+
+        let baseline =
+            Watcher::new(&mut store, &source, start, TTL, Freshness::Default).check(None)?;
+        assert!(baseline.changes.is_empty());
+        let within_ttl = start + TimeDelta::seconds(299);
+        let cached =
+            Watcher::new(&mut store, &source, within_ttl, TTL, Freshness::Default).check(None)?;
+        assert_eq!(cached.as_of, Some(start));
+        assert!(cached.changes.is_empty());
+        assert_eq!(source.0.borrow().len(), 3);
+
+        let expiry = start + TimeDelta::seconds(301);
+        let changed =
+            Watcher::new(&mut store, &source, expiry, TTL, Freshness::Default).check(None)?;
+        let changes = changed
+            .changes
+            .iter()
+            .map(|event| &event.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changes,
+            vec![
+                &ChangeKind::ApplicationsChanged {
+                    from: Some(0),
+                    to: Some(2)
+                },
+                &ChangeKind::Assigned {
+                    who: json!({"id": "alice"})
+                },
+                &ChangeKind::AssigneesChanged {
+                    from: vec![],
+                    to: vec![json!("alice")]
+                },
+                &ChangeKind::PrLinked {
+                    url: "https://github.com/o/r/pull/2".into()
+                },
+                &ChangeKind::StateChanged {
+                    from: Some("open".into()),
+                    to: Some("in_progress".into())
+                },
+                &ChangeKind::PointsChanged {
+                    from: Some(100),
+                    to: Some(250)
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&changed.changes[0])?["type"],
+            "applications_changed"
+        );
+
+        let failure_time = expiry + TimeDelta::seconds(1);
+        let failure =
+            Watcher::new(&mut store, &source, failure_time, TTL, Freshness::Fresh).check(None)?;
+        assert!(failure.partial);
+        assert!(failure.changes.is_empty());
+        assert_eq!(store.watch_log(Some(ID), None)?.len(), 2);
+
+        let gone_time = failure_time + TimeDelta::seconds(1);
+        let gone =
+            Watcher::new(&mut store, &source, gone_time, TTL, Freshness::Fresh).check(None)?;
+        assert_eq!(gone.changes.len(), 1);
+        assert_eq!(gone.changes[0].kind, ChangeKind::Disappeared);
+        let still_gone = Watcher::new(
+            &mut store,
+            &source,
+            gone_time + TimeDelta::seconds(1),
+            TTL,
+            Freshness::Default,
+        )
+        .check(None)?;
+        assert!(still_gone.changes.is_empty());
+        assert!(source.0.borrow().is_empty());
+
+        assert!(store.watch_remove(ID)?);
+        assert!(store.watchlist()?.is_empty());
+        let log = store.watch_log(Some(ID), Some(expiry))?;
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].changes, gone.changes);
+        assert_eq!(log[1].changes, changed.changes);
+        Ok(())
+    }
+
+    #[test]
+    fn offline_watch_distinguishes_missing_cache_from_stale_data() -> Result<()> {
+        let mut store = Store::memory()?;
+        let source = Fixture(RefCell::new(VecDeque::new()));
+        let time = now();
+        store.watch_add(ID, None, time)?;
+        let empty = Watcher::new(&mut store, &source, time, TTL, Freshness::Offline).check(None)?;
+        assert!(empty.partial);
+        assert!(empty.warnings[0].contains("no cache"));
+        assert!(store.watch_log(None, None)?.is_empty());
+
+        store.upsert_issue(&json!({"id": ID, "state": "open"}), time)?;
+        let later = time + TimeDelta::hours(1);
+        let stale =
+            Watcher::new(&mut store, &source, later, TTL, Freshness::Offline).check(None)?;
+        assert!(!stale.partial);
+        assert_eq!(stale.as_of, Some(time));
+        assert!(stale.warnings[0].contains("stale Wave cache"));
+        assert!(store.watch_log(None, None)?[0].snapshot.present);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshots_keep_github_baseline_across_wave_only_runs() -> Result<()> {
+        let mut store = Store::memory()?;
+        let time = now();
+        store.watch_add(ID, None, time)?;
+        let wave = json!({"id": ID, "state": "open", "assignees": ["beta", "alpha"]});
+        let mut baseline = Snapshot::from_issue(Some(&wave), time);
+        let mut github = GhIssueStatus {
+            state: "open".into(),
+            assignees: vec![],
+            linked_prs: vec![],
+        };
+        baseline.github = Some(github.clone());
+        baseline.github_as_of = Some(time);
+        assert!(store.record_watch_snapshot(ID, time, baseline)?.is_empty());
+
+        let later = time + TimeDelta::minutes(10);
+        let reordered = json!({"id": ID, "state": "open", "assignees": ["alpha", "beta"]});
+        let next = Snapshot::from_issue(Some(&reordered), later);
+        assert!(store.record_watch_snapshot(ID, later, next)?.is_empty());
+        assert_eq!(
+            store.watch_log(None, None)?[0].snapshot.github.as_ref(),
+            Some(&github)
+        );
+
+        let last = later + TimeDelta::minutes(10);
+        let mut snapshot = Snapshot::from_issue(Some(&reordered), last);
+        github
+            .linked_prs
+            .push("https://github.com/o/r/pull/2".into());
+        snapshot.github = Some(github.clone());
+        snapshot.github_as_of = Some(last);
+        let changes = store.record_watch_snapshot(ID, last, snapshot)?;
+        assert!(
+            matches!(&changes[..], [ChangeEvent { kind: ChangeKind::GitHubChanged { to, .. }, .. }] if to == &github)
+        );
+        Ok(())
+    }
 }
