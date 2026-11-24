@@ -85,10 +85,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           overwrite: true
+      - name: Report artifact-only release
+        if: ${{ vars.NPM_TRUSTED_PUBLISHING_ENABLED != 'true' }}
+        run: |
+          echo 'Trusted publishing is disabled. The verified tarball is available in the `npm-package` artifact.' >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     name: Publish tested tarball via npm trusted publishing
     needs: [version, pack]
+    if: ${{ vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: npm
