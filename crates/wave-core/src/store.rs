@@ -408,9 +408,37 @@ impl Store {
         row.map(|(raw, value)| read_cached(&raw, value)).transpose()
     }
 
+    pub(crate) fn cached_issue_reference(
+        &self,
+        program_id: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<String>> {
+        let number = i64::try_from(number).context("GitHub issue number is too large")?;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM issues
+             WHERE program_id = ?1 AND repo_name = ?2 AND issue_number = ?3
+             ORDER BY fetched_at DESC, id ASC LIMIT 1",
+                params![program_id, repo, number],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn upsert_issue(&mut self, issue: &Value, fetched_at: DateTime<Utc>) -> Result<()> {
+        self.upsert_issue_for_program(issue, None, fetched_at)
+    }
+
+    pub(crate) fn upsert_issue_for_program(
+        &mut self,
+        issue: &Value,
+        program_id: Option<&str>,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        write_issue(&tx, issue, None, fetched_at)?;
+        write_issue(&tx, issue, program_id, fetched_at)?;
         tx.commit()?;
         Ok(())
     }
@@ -463,8 +491,7 @@ impl Store {
         scope: &str,
         program_id: &str,
         issues: &[Value],
-        generation: i64,
-        position: i64,
+        (generation, position): (i64, i64),
         state: &ScopeState,
         now: DateTime<Utc>,
     ) -> Result<()> {

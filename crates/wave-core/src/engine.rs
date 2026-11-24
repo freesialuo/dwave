@@ -219,8 +219,15 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
         match IssueReference::parse(reference)? {
             IssueReference::Id(id) => self.issue_by_id(&id, freshness),
             IssueReference::GitHub(repo, number) => {
-                if let Some(cached) = self.store.cached_issue_by_github(&repo, number)? {
-                    return self.issue_by_id(record_id(&cached.data)?, freshness);
+                let slug = program_slug.trim().to_ascii_lowercase();
+                if let Some(program) = self.store.cached_program(&slug)? {
+                    let program_id = record_id(&program.data)?;
+                    if let Some(id) = self
+                        .store
+                        .cached_issue_reference(program_id, &repo, number)?
+                    {
+                        return self.issue_by_id(&id, freshness);
+                    }
                 }
                 if freshness == Freshness::Offline {
                     return Ok(cached_value(
@@ -351,7 +358,11 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
                         .as_str()
                         .is_none_or(|id| id == query.program_id);
                 if matches {
-                    self.store.upsert_issue(&issue, Utc::now())?;
+                    self.store.upsert_issue_for_program(
+                        &issue,
+                        Some(&query.program_id),
+                        Utc::now(),
+                    )?;
                     return Ok((Some(issue), true));
                 }
             }
@@ -804,8 +815,7 @@ impl<'a, S: WaveSource + ?Sized> Engine<'a, S> {
             key,
             &remote.program_id,
             &page.data,
-            generation,
-            position,
+            (generation, position),
             state,
             now,
         )
