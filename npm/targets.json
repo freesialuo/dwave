@@ -1,0 +1,7 @@
+{
+  "darwin-arm64": "dwave",
+  "darwin-x64": "dwave",
+  "linux-arm64": "dwave",
+  "linux-x64": "dwave",
+  "win32-x64": "dwave.exe"
+}

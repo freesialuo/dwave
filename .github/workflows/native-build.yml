@@ -1,0 +1,99 @@
+name: Native build
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TARGET_DIR: target
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-22.04
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: darwin-arm64
+            runner: macos-15
+          - target: win32-x64
+            runner: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Check runner architecture
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          $target = node -p 'process.platform + "-" + process.arch'
+          if ($target -ne $env:EXPECTED_TARGET) { throw "Expected $env:EXPECTED_TARGET, got $target" }
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Run fixture-based tests
+        run: cargo +stable test --locked --workspace
+      - name: Build binary
+        if: ${{ !inputs.release }}
+        run: cargo +stable build --locked -p dwave --bin dwave
+      - name: Build optimized binary
+        if: ${{ inputs.release }}
+        run: cargo +stable build --locked --release -p dwave --bin dwave
+      - name: Stage native npm smoke package
+        env:
+          PROFILE: ${{ inputs.release && 'release' || 'debug' }}
+        run: |
+          $binary = if ($IsWindows) { 'dwave.exe' } else { 'dwave' }
+          $source = Join-Path 'target' $env:PROFILE $binary
+          node scripts/stage-npm.mjs (Join-Path $env:RUNNER_TEMP 'npm-stage') $source --host-only
+      - name: Pack and install offline
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $stage = Join-Path $env:RUNNER_TEMP 'npm-stage'
+          $pack = npm pack $stage --pack-destination $env:RUNNER_TEMP --json | Out-String | ConvertFrom-Json
+          $archive = Join-Path $env:RUNNER_TEMP $pack.filename
+          $prefix = Join-Path $env:RUNNER_TEMP 'npm-install'
+          npm install --global --prefix $prefix --ignore-scripts --offline --no-audit --no-fund $archive
+      - name: Run the installed dwave command
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $prefix = Join-Path $env:RUNNER_TEMP 'npm-install'
+          $command = Join-Path $prefix $(if ($IsWindows) { 'dwave.cmd' } else { 'bin/dwave' })
+          $version = (Get-Content -Raw npm/package.json | ConvertFrom-Json).version
+          $actual = & $command --version
+          if ($actual -ne "dwave $version") { throw "Unexpected CLI version: $actual" }
+          & $command --help
+          $PSNativeCommandUseErrorActionPreference = $false
+          & $command unknown-command 2>$null
+          if ($LASTEXITCODE -ne 2) { throw "Expected CLI usage exit 2, got $LASTEXITCODE" }
+          exit 0
+      - name: Upload verified native binary
+        if: ${{ inputs.release }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/release/${{ runner.os == 'Windows' && 'dwave.exe' || 'dwave' }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
