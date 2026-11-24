@@ -11,9 +11,10 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::engine::Freshness;
 use crate::filter::{github_issue_number, repo_name};
 use crate::gateway::{Gateway, GetRequest};
-use crate::store::{Freshness, Store};
+use crate::store::Store;
 
 const HOST: &str = "api.github.com";
 
@@ -415,4 +416,230 @@ fn write_cache(store: &Store, url: &str, page: &CachedPage) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use chrono::TimeDelta;
+    use reqwest::header::{HeaderMap, ETAG, LINK};
+    use serde_json::json;
+
+    use super::*;
+    use crate::gateway::{HostPolicy, HttpResponse, HttpTransport, TransportError};
+
+    const ISSUE: &str = "https://api.github.com/repos/o/r/issues/17";
+    const TIMELINE: &str = "https://api.github.com/repos/o/r/issues/17/timeline?per_page=100";
+    const PAGE_TWO: &str = "https://api.github.com/repositories/123/issues/17/timeline?page=2";
+    const TTL: Duration = Duration::from_secs(1800);
+
+    struct Exchange {
+        url: &'static str,
+        conditional: Option<&'static str>,
+        response: HttpResponse,
+    }
+
+    struct Transport(Mutex<VecDeque<Exchange>>);
+
+    impl HttpTransport for Transport {
+        fn get(
+            &self,
+            request: &GetRequest,
+            url: &Url,
+            _: Duration,
+        ) -> std::result::Result<HttpResponse, TransportError> {
+            let exchange = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected GitHub request");
+            assert_eq!(url.as_str(), exchange.url);
+            assert_eq!(request.etag.as_deref(), exchange.conditional);
+            assert_eq!(request.bearer_token.as_deref(), Some("fixture-token"));
+            assert_eq!(
+                request.accept.as_deref(),
+                Some("application/vnd.github+json")
+            );
+            Ok(exchange.response)
+        }
+    }
+
+    fn exchange(
+        url: &'static str,
+        status: u16,
+        conditional: Option<&'static str>,
+        etag: Option<&'static str>,
+        link: Option<String>,
+        body: Value,
+    ) -> Exchange {
+        let mut headers = HeaderMap::new();
+        if let Some(etag) = etag {
+            headers.insert(ETAG, etag.parse().unwrap());
+        }
+        if let Some(link) = link {
+            headers.insert(LINK, link.parse().unwrap());
+        }
+        Exchange {
+            url,
+            conditional,
+            response: HttpResponse {
+                status,
+                headers,
+                body: serde_json::to_vec(&body).unwrap(),
+            },
+        }
+    }
+
+    fn client(exchanges: impl Into<VecDeque<Exchange>>) -> Result<GitHubClient> {
+        let gateway = Arc::new(Gateway::with_transport(
+            20,
+            HostPolicy::default(),
+            Transport(Mutex::new(exchanges.into())),
+        )?);
+        let client = GitHubClient::new(gateway, TTL);
+        client.token.set(Some("fixture-token".into())).unwrap();
+        Ok(client)
+    }
+
+    fn time() -> DateTime<Utc> {
+        "2026-11-24T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn github_pagination_and_conditional_cache_preserve_prs() -> Result<()> {
+        let store = Store::memory()?;
+        let first = "\"issue\"";
+        let second = "W/\"timeline-1\"";
+        let third = "\"timeline-2\"";
+        let link = format!("<{PAGE_TWO}>; rel=\"next\", <{PAGE_TWO}>; rel=\"last\"");
+        let cross_reference = json!({
+            "event": "cross-referenced",
+            "source": {"issue": {"pull_request": {"html_url": "https://github.com/o/r/pull/25"}}}
+        });
+        let older_pr = json!({
+            "event": "connected",
+            "subject": {"pull_request": {"html_url": "https://github.com/o/r/pull/24"}}
+        });
+        let recent_pr = json!({
+            "event": "cross-referenced",
+            "source": {"issue": {"pull_request": {"html_url": "https://github.com/other/r/pull/55"}}}
+        });
+        let client = client([
+            exchange(
+                ISSUE,
+                200,
+                None,
+                Some(first),
+                None,
+                json!({"state": "open", "assignees": [{"login":"b"}, {"login":"a"}], "assignee":{"login":"a"}}),
+            ),
+            exchange(
+                TIMELINE,
+                200,
+                None,
+                Some(second),
+                Some(link),
+                json!([cross_reference, older_pr]),
+            ),
+            exchange(
+                PAGE_TWO,
+                200,
+                None,
+                Some(third),
+                None,
+                json!([
+                    {"event":"disconnected","subject":older_pr["subject"]},
+                    recent_pr, cross_reference,
+                    {"event":"cross-referenced","source":{"issue":{"html_url":"https://github.com/o/r/issues/18"}}}
+                ]),
+            ),
+            exchange(ISSUE, 304, Some(first), None, None, Value::Null),
+            exchange(TIMELINE, 304, Some(second), None, None, Value::Null),
+            exchange(PAGE_TWO, 304, Some(third), None, None, Value::Null),
+        ])?;
+        let start = time();
+        let first = client.enrich(&store, "O/R", 17, Freshness::Default, start)?;
+        let expected = GhIssueStatus {
+            state: "open".into(),
+            assignees: vec!["a".into(), "b".into()],
+            linked_prs: vec![
+                "https://github.com/o/r/pull/25".into(),
+                "https://github.com/other/r/pull/55".into(),
+            ],
+        };
+        assert_eq!(first.status.as_ref(), Some(&expected));
+        assert_eq!(first.as_of, Some(start));
+        assert!(!first.partial);
+        assert!(first.warnings.is_empty());
+
+        let ten_minutes = start + TimeDelta::minutes(10);
+        let cached = client.enrich(&store, "o/r", 17, Freshness::Default, ten_minutes)?;
+        assert_eq!(cached.status, first.status);
+        assert_eq!(cached.as_of, first.as_of);
+        assert_eq!(client.gateway.metrics().requests, 3);
+
+        let forced = client.enrich(&store, "o/r", 17, Freshness::Fresh, ten_minutes)?;
+        assert_eq!(forced.status, first.status);
+        assert_eq!(forced.as_of, Some(ten_minutes));
+        assert_eq!(client.gateway.metrics().not_modified, 3);
+
+        let older = start + TimeDelta::hours(1);
+        let offline = client.enrich(&store, "o/r", 17, Freshness::Offline, older)?;
+        assert_eq!(offline.status, first.status);
+        assert_eq!(offline.as_of, forced.as_of);
+        assert!(!offline.partial);
+        assert!(offline.warnings[0].contains("stale GitHub cache"));
+        assert_eq!(client.gateway.metrics().requests, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn github_does_not_follow_cross_origin_pagination() -> Result<()> {
+        let store = Store::memory()?;
+        let client = client([
+            exchange(ISSUE, 200, None, None, None, json!({"state":"open"})),
+            exchange(
+                TIMELINE,
+                200,
+                None,
+                None,
+                Some("<https://example.com/untrusted/timeline>; rel=\"next\"".into()),
+                json!([]),
+            ),
+        ])?;
+        let result = client.enrich(&store, "o/r", 17, Freshness::Default, time())?;
+        assert!(result.partial);
+        assert!(result.status.is_none());
+        assert_eq!(
+            result.warnings,
+            ["GitHub supplied an invalid timeline pagination link"]
+        );
+        assert_eq!(client.gateway.metrics().requests, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn github_caches_confirmed_missing_issue_without_timeline_request() -> Result<()> {
+        let store = Store::memory()?;
+        let client = client([exchange(ISSUE, 404, None, None, None, Value::Null)])?;
+        let start = time();
+        let result = client.enrich(&store, "o/r", 17, Freshness::Default, start)?;
+        assert!(result.partial);
+        assert!(result.status.is_none());
+        assert!(result.warnings[0].contains("o/r#17 is unavailable"));
+        let cached = client.enrich(
+            &store,
+            "o/r",
+            17,
+            Freshness::Default,
+            start + TimeDelta::seconds(1),
+        )?;
+        assert_eq!(cached.warnings, result.warnings);
+        assert_eq!(cached.as_of, result.as_of);
+        assert_eq!(client.gateway.metrics().requests, 1);
+        Ok(())
+    }
 }
