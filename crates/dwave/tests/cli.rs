@@ -92,6 +92,8 @@ fn validates_filters_and_global_arguments_as_usage_errors() {
     let fixture = Fixture::new("invalid-args");
     for args in [
         &["issues", "--fresh", "--offline"][..],
+        &["sync", "--offline", "--full"],
+        &["issue", "show", "invalid", "--offline"],
         &["issues", "--json", "--ndjson"],
         &["issues", "--offline", "--limit", "0"],
         &["issues", "--pending", "8..=3"],
@@ -272,4 +274,169 @@ fn watch_reports_confirmed_changes_and_partial_errors_with_json() {
         0,
     );
     assert_eq!(remove["data"][0]["removed"], true);
+}
+
+#[test]
+fn renders_offline_program_waves_and_issue_pages_from_the_shared_store() {
+    use wave_core::{
+        engine::{Engine, EngineConfig, Freshness, ListingOptions},
+        filter::Filter,
+        source::{Issue, Page, Program, RemoteQuery, Wave, WaveSource},
+    };
+
+    struct Source {
+        count: usize,
+    }
+    impl WaveSource for Source {
+        fn program(&self, slug: &str) -> anyhow::Result<Program> {
+            Ok(json!({ "id": "stellar-id", "slug": slug }))
+        }
+
+        fn waves(&self, _: &str, _: u32) -> anyhow::Result<Vec<Wave>> {
+            Ok(vec![
+                json!({ "id": "wave-5", "waveNumber": 5, "status": "completed" }),
+                json!({ "id": "wave-6", "waveNumber": 6, "status": "active" }),
+            ])
+        }
+
+        fn issues_page(
+            &self,
+            query: &RemoteQuery,
+            cursor: Option<&str>,
+        ) -> anyhow::Result<Page<Issue>> {
+            let issues = [
+                json!({
+                    "id": ISSUE_ID, "state": "open", "title": "First issue",
+                    "waveProgramId": "stellar-id", "updatedAt": "2026-02-20T00:00:00Z",
+                }),
+                json!({
+                    "id": MISSING_ID, "state": "open", "title": "Second issue",
+                    "waveProgramId": "stellar-id", "updatedAt": "2026-02-19T00:00:00Z",
+                }),
+            ];
+            let offset: usize = cursor.unwrap_or("0").parse()?;
+            let data: Vec<_> = issues
+                .into_iter()
+                .take(self.count)
+                .skip(offset)
+                .take(query.limit as usize)
+                .collect();
+            let end = offset + data.len();
+            Ok(Page {
+                data,
+                total: Some(self.count as u64),
+                next_cursor: (end < self.count).then(|| end.to_string()),
+            })
+        }
+
+        fn issue(&self, _: &str) -> anyhow::Result<Option<Issue>> {
+            anyhow::bail!("fixture has no single-issue endpoint")
+        }
+    }
+
+    let fixture = Fixture::new("listing");
+    {
+        let mut store = fixture.store();
+        let mut engine = Engine::new(&mut store, &Source { count: 2 }, EngineConfig::default());
+        engine
+            .list(
+                "stellar",
+                &Filter::default(),
+                ListingOptions {
+                    limit: 1,
+                    page: 2,
+                    ..ListingOptions::default()
+                },
+            )
+            .unwrap();
+        engine.waves("stellar-id", Freshness::Fresh).unwrap();
+    }
+
+    let current = envelope(
+        &fixture.run(&["waves", "--current", "--offline", "--json"]),
+        0,
+    );
+    assert_eq!(current["data"].as_array().unwrap().len(), 1);
+    assert_eq!(current["data"][0]["waveNumber"], 6);
+
+    let program = envelope(
+        &fixture.run(&[
+            "program",
+            "show",
+            "stellar",
+            "--program",
+            "ignore-me",
+            "--offline",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(program["data"]["id"], "stellar-id");
+    assert_eq!(program["meta"]["program"], "stellar");
+
+    let issue_page = envelope(
+        &fixture.run(&[
+            "issues",
+            "--limit",
+            "1",
+            "--page",
+            "2",
+            "--offline",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(
+        issue_page["page"],
+        json!({ "page": 2, "limit": 1, "total": 2 })
+    );
+    assert_eq!(issue_page["data"][0]["title"], "Second issue");
+    assert_eq!(issue_page["meta"]["partial"], false);
+
+    let update_scope = |count| {
+        let mut store = fixture.store();
+        Engine::new(&mut store, &Source { count }, EngineConfig::default())
+            .list(
+                "stellar",
+                &Filter::default(),
+                ListingOptions {
+                    full: true,
+                    ..ListingOptions::default()
+                },
+            )
+            .unwrap();
+    };
+    update_scope(1);
+    let baseline = envelope(
+        &fixture.run(&["issues", "--new-since-last", "--offline", "--json"]),
+        0,
+    );
+    assert_eq!(baseline["data"], json!([]));
+    assert_eq!(baseline["meta"]["partial"], false);
+
+    update_scope(2);
+    let out_of_range = envelope(
+        &fixture.run(&[
+            "issues",
+            "--new-since-last",
+            "--page",
+            "9",
+            "--offline",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(out_of_range["page"]["total"], 1);
+    assert_eq!(out_of_range["data"], json!([]));
+
+    let delivered = envelope(
+        &fixture.run(&["issues", "--new-since-last", "--offline", "--json"]),
+        10,
+    );
+    assert_eq!(delivered["data"][0]["title"], "Second issue");
+    let repeat = envelope(
+        &fixture.run(&["issues", "--new-since-last", "--offline", "--json"]),
+        0,
+    );
+    assert_eq!(repeat["data"], json!([]));
 }

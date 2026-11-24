@@ -1,7 +1,7 @@
 mod args;
 mod render;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use args::{
     CacheCommand, Cli, Command, ConfigCommand, FilterArgs, IssueCommand, IssuesArgs, PresetCommand,
     ProgramCommand, SyncArgs, WatchCommand,
@@ -16,7 +16,7 @@ use wave_core::{
     config::{
         default_config_path, default_db_path, parse_duration, validate_slug, Config, ConfigFile,
     },
-    engine::{Engine, EngineConfig, Freshness, ListingOptions, Refresh},
+    engine::{Engine, EngineConfig, Freshness, IssueReference, ListingOptions, Refresh},
     filter::Filter,
     gateway::{Gateway, HostPolicy},
     github::GitHubClient,
@@ -278,7 +278,7 @@ impl<'a> App<'a> {
             return self.explain(program, &filter, options);
         }
         let listing = self.engine().list(program, &filter, options)?;
-        let changed = args.new_since_last && listing.total > 0;
+        let changed = args.new_since_last && !listing.data.is_empty();
         let mut report =
             Report::new(View::Issues, Value::Array(listing.data), listing.as_of).program(program);
         report.page = Some(render::Page {
@@ -356,13 +356,8 @@ impl<'a> App<'a> {
 
     fn issue(&mut self, program: &str, reference: &str, github: bool) -> Result<Report> {
         let freshness = self.freshness;
-        let refresh = self.engine().issue(reference, freshness, program)?;
-        let issue = refresh
-            .data
-            .ok_or_else(|| missing_issue(reference, &refresh.warnings))?;
-        let mut report = Report::new(View::Issue, issue, refresh.as_of).program(program);
-        report.meta.partial = refresh.partial;
-        report.meta.warnings = refresh.warnings;
+        let refresh = self.resolve_issue(program, reference, freshness)?;
+        let mut report = report_for(View::Issue, refresh)?.program(program);
         if github {
             let client = self.github()?;
             self.enrich(&client, &mut report.data, &mut report.meta)?;
@@ -388,18 +383,17 @@ impl<'a> App<'a> {
 
     fn watch(&mut self, program: &str, command: &WatchCommand) -> Result<Report> {
         let now = self.now;
+        let mut warnings = Vec::new();
+        let mut partial = false;
         let (view, data) = match command {
             WatchCommand::Add { refs, note } => {
-                let mut ids = Vec::new();
+                let mut ids = BTreeSet::new();
                 for reference in refs {
-                    let freshness = self.freshness;
-                    let refresh = self.engine().issue(reference, freshness, program)?;
-                    let issue = refresh
-                        .data
-                        .ok_or_else(|| missing_issue(reference, &refresh.warnings))?;
-                    ids.push(issue_id(&issue)?.to_owned());
+                    let refresh = self.resolve_issue(program, reference, self.freshness)?;
+                    ids.insert(issue_id(&refresh.data)?.to_owned());
+                    warnings.extend(refresh.warnings);
+                    partial |= refresh.partial;
                 }
-                let ids: BTreeSet<_> = ids.into_iter().collect();
                 for id in &ids {
                     self.store.watch_add(id, note.as_deref(), now)?;
                 }
@@ -456,7 +450,10 @@ impl<'a> App<'a> {
                 )
             }
         };
-        Ok(Report::new(view, data, Some(now)))
+        let mut report = Report::new(view, data, Some(now));
+        report.meta.warnings = warnings;
+        report.meta.partial = partial;
+        Ok(report)
     }
 
     fn history_id(
@@ -465,26 +462,31 @@ impl<'a> App<'a> {
         reference: &str,
         freshness: Freshness,
     ) -> Result<String> {
-        if is_uuid(reference) {
-            return Ok(reference.to_ascii_lowercase());
+        if let IssueReference::Id(id) = IssueReference::parse(reference).map_err(usage)? {
+            return Ok(id);
         }
+        let refresh = self.resolve_issue(program, reference, freshness)?;
+        Ok(issue_id(&refresh.data)?.into())
+    }
+
+    fn resolve_issue(
+        &mut self,
+        program: &str,
+        reference: &str,
+        freshness: Freshness,
+    ) -> Result<Refresh<Value>> {
+        IssueReference::parse(reference).map_err(usage)?;
         let refresh = self.engine().issue(reference, freshness, program)?;
-        let issue = refresh
+        let data = refresh
             .data
             .ok_or_else(|| missing_issue(reference, &refresh.warnings))?;
-        Ok(issue_id(&issue)?.into())
-    }
-}
-
-fn is_uuid(reference: &str) -> bool {
-    reference.len() == 36
-        && reference.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
+        Ok(Refresh {
+            data,
+            as_of: refresh.as_of,
+            warnings: refresh.warnings,
+            partial: refresh.partial,
         })
+    }
 }
 
 fn issue_id(value: &Value) -> Result<&str> {
