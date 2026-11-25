@@ -120,7 +120,7 @@ Run `dwave <command> --help` for full option details on any subcommand.
 - **Server-pushed** (evaluated remotely and re-checked locally): `--state <state|all>` (default `open`), `--never-applied` / `--has-applications`, `--has-pr` / `--no-pr`, `--search <text>`, plus a single `--repo <OWNER/REPO>` once its Wave repository UUID is known in cache.
 - **Local-only** (require syncing the matching remote scope first): `--pending <N|N..=M|..=M|N..>`, `--assigned` / `--unassigned`, `--min-points <n>`, `--max-points <n>`, repeatable `--label <name>` (AND), multiple `--repo <OWNER/REPO>` (OR), `--updated-since <dur>`, and `--sort points|created`.
 
-**Execution modes (inspect with `--explain` without making requests):**
+**Execution modes (inspect with `--explain` without making requests; the plan lists the `remote` query and the `local` filters applied to cached rows):**
 
 - **Passthrough**: When every active filter and sort is server-pushable (and `--full` / `--new-since-last` are not set), `dwave` fetches only enough pages to satisfy `--limit` and `--page`.
 - **Scoped sync**: When any predicate or sort requires local evaluation, `dwave` syncs the narrowest remote scope into SQLite. Subsequent runs within `listing_ttl` make zero requests; afterwards they run incremental `updatedAt` syncs with an overlap window (`overlap`) and an automatic full resync every `full_interval` (24h) when the estimated page count fits the remaining budget. If `--max-requests` is hit mid-sync, `dwave` saves the cursor so the next run resumes and marks `meta.partial = true`. Overlapping runs in separate processes take an advisory scope lock and fall back to cached results with a warning rather than fetching twice.
@@ -132,7 +132,7 @@ Run `dwave <command> --help` for full option details on any subcommand.
 | `untouched` | `state=open`, `--never-applied`, `--no-pr` | `cheap` | Narrower than `--pending 0`: excludes issues with earlier withdrawn or rejected applications |
 | `open-pending-0` | `state=open`, `--pending 0`, `--unassigned`, `--no-pr` | `broad` | Includes issues with past non-pending applications; combine with `--repo` or raise `--max-requests` |
 | `unassigned` | `state=open`, `--unassigned`, `--no-pr` | `broad` | Open unassigned issues with no Wave PR link |
-| `high-value` | `state=open`, `--unassigned`, `--min-points <high_value_min_points>` | `broad` | Default threshold is `1000` (configurable via `dwave config set high_value_min_points <n>`) |
+| `high-value` | `state=open`, `--unassigned`, `--min-points <high_value_min_points>` | `broad` | Default threshold is `200`, the official High tier (configurable via `dwave config set high_value_min_points <n>`) |
 | `repo` | `state=open` | `repository-dependent` | Requires at least one `--repo OWNER/REPO` |
 
 When saving a preset with `dwave preset save`, omitted `--state` defaults to `open`; pass `--state all` to match any state.
@@ -228,7 +228,7 @@ Durations accept `<n>s`, `<n>m`, `<n>h`, `<n>d`, or `<n>w`.
 | `max_requests` | `50` | Default per-invocation HTTP request budget |
 | `wave_rate` | `2.0` | Token-bucket rate limit (requests/sec) for `wave-api.drips.network` |
 | `wave_burst` | `4` | Token-bucket burst size for `wave-api.drips.network` |
-| `high_value_min_points` | `1000` | Minimum points used by the built-in `high-value` preset |
+| `high_value_min_points` | `200` | Minimum points used by the built-in `high-value` preset |
 | `hidden_presets` | `[]` | Built-in preset names hidden by `dwave preset rm` |
 
 ### GitHub Cross-Checking & Caveats

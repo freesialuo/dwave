@@ -187,6 +187,35 @@ fn persists_defaults_and_presets_and_applies_explicit_overrides() {
     assert_eq!(plan["data"]["mode"], "scoped_sync");
     assert_eq!(plan["data"]["remote"]["state"], "open");
     assert_eq!(plan["data"]["remote"]["has_pr"], true);
+    assert_eq!(plan["data"]["local"]["pending"]["max"], 2);
+    assert_eq!(plan["data"]["local"]["repos"][0], "org/project");
+    let high_value = envelope(
+        &fixture.run(&[
+            "issues",
+            "--preset",
+            "high-value",
+            "--explain",
+            "--offline",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(high_value["data"]["local"]["points"]["min"], 250);
+    assert_eq!(high_value["data"]["local"]["assigned"], false);
+    let overridden = envelope(
+        &fixture.run(&[
+            "issues",
+            "--preset",
+            "high-value",
+            "--min-points",
+            "150",
+            "--explain",
+            "--offline",
+            "--json",
+        ]),
+        0,
+    );
+    assert_eq!(overridden["data"]["local"]["points"]["min"], 150);
     let default_plan = envelope(
         &fixture.run(&["issues", "--program", "stellar", "--explain", "--json"]),
         0,

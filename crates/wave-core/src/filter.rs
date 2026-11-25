@@ -71,7 +71,21 @@ pub enum Mode {
 pub struct Plan {
     pub mode: Mode,
     pub remote: RemoteQuery,
+    /// Filters the remote query cannot express; applied to cached rows.
+    pub local: LocalFilter,
     pub estimated_requests: Option<u64>,
+}
+
+/// The filter fields that are matched only against the local cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalFilter {
+    pub pending: Option<Bounds>,
+    pub assigned: Option<bool>,
+    pub points: Option<Bounds>,
+    pub repos: Vec<String>,
+    pub labels: Vec<String>,
+    /// Maximum age of an issue's update, in seconds.
+    pub updated_since: Option<u64>,
 }
 
 impl Filter {
@@ -107,6 +121,14 @@ impl Filter {
                 sort_by: Some("updatedAt".into()),
                 sort_order: Some("desc".into()),
                 limit: 100,
+            },
+            local: LocalFilter {
+                pending: self.pending,
+                assigned: self.assigned,
+                points: self.points,
+                repos: self.repos.clone(),
+                labels: self.labels.clone(),
+                updated_since: self.updated_since,
             },
             estimated_requests: None,
         }

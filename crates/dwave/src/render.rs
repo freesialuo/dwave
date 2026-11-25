@@ -184,6 +184,7 @@ fn human(out: &mut impl Write, report: &Report, color: bool) -> io::Result<()> {
             let plan = data.get("plan").unwrap_or(data);
             writeln!(out, "Mode: {}", cell(&plan["mode"]))?;
             writeln!(out, "Remote query: {}", cell(&plan["remote"]))?;
+            writeln!(out, "Local filters: {}", cell(&plan["local"]))?;
             writeln!(
                 out,
                 "Estimated requests: {}",

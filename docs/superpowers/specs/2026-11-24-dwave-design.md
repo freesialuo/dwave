@@ -184,7 +184,8 @@ The planner picks one of two execution modes:
   filter and paginate locally. Cost is estimated first and bounded by the
   budget.
 
-`--explain` prints the chosen mode, the remote query, and estimated requests.
+`--explain` prints the chosen mode, the remote query, the local-only filters,
+and estimated requests.
 
 Built-in presets are plain data shipped as
 examples for different kinds of users; each lists its estimated sync cost in

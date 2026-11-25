@@ -43,7 +43,7 @@ impl Default for Config {
             max_requests: 50,
             wave_rate: 2.0,
             wave_burst: 4,
-            high_value_min_points: 1000,
+            high_value_min_points: 200,
             hidden_presets: Vec::new(),
             presets: BTreeMap::new(),
         }

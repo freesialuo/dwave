@@ -1,6 +1,6 @@
 {
   "name": "@freesialuo/dwave",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Unofficial command-line client for Drips Wave programs",
   "homepage": "https://github.com/freesialuo/dwave#readme",
   "repository": {
